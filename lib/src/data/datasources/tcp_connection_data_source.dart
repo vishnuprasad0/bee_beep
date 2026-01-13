@@ -153,7 +153,7 @@ class _BeeBeepConnection {
        _localHello = localHello,
        _localPrivateKey = localPrivateKey,
        _ecdh = ecdh,
-      _onPeerIdentity = onPeerIdentity,
+       _onPeerIdentity = onPeerIdentity,
        _log = onLog;
 
   final Socket _socket;

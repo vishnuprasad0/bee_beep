@@ -41,16 +41,13 @@ class PeersCubit extends Cubit<PeersState> {
       onError: (e) => emit(state.copyWith(errorMessage: e.toString())),
     );
 
-    _identitiesSub ??= _watchPeerIdentities().listen(
-      (identity) {
-        final trimmed = identity.displayName.trim();
-        if (trimmed.isEmpty) return;
+    _identitiesSub ??= _watchPeerIdentities().listen((identity) {
+      final trimmed = identity.displayName.trim();
+      if (trimmed.isEmpty) return;
 
-        _displayNameByPeerId[identity.peerId] = trimmed;
-        emit(state.copyWith(peers: _applyDisplayNames(state.peers)));
-      },
-      onError: (e) => emit(state.copyWith(errorMessage: e.toString())),
-    );
+      _displayNameByPeerId[identity.peerId] = trimmed;
+      emit(state.copyWith(peers: _applyDisplayNames(state.peers)));
+    }, onError: (e) => emit(state.copyWith(errorMessage: e.toString())));
 
     try {
       await _startDiscovery();

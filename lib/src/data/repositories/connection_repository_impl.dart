@@ -12,7 +12,8 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
   Stream<String> watchLogs() => _dataSource.watchLogs();
 
   @override
-  Stream<PeerIdentity> watchPeerIdentities() => _dataSource.watchPeerIdentities();
+  Stream<PeerIdentity> watchPeerIdentities() =>
+      _dataSource.watchPeerIdentities();
 
   @override
   Future<void> startServer({required int port}) =>
