@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import 'src/domain/entities/chat_message.dart';
 import 'src/presentation/app/app_di.dart';
+import 'src/presentation/bloc/chat/chat_cubit.dart';
 import 'src/presentation/bloc/logs/logs_cubit.dart';
 import 'src/presentation/bloc/peers/peers_cubit.dart';
 import 'src/presentation/pages/home_page.dart';
@@ -50,6 +52,24 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
           ),
           BlocProvider(
             create: (_) => LogsCubit(watchLogs: widget.di.watchLogs),
+          ),
+          BlocProvider(
+            create: (context) {
+              final cubit = ChatCubit();
+              // Listen to received messages and add them to chat
+              widget.di.watchReceivedMessages().listen((receivedMsg) {
+                final message = ChatMessage(
+                  id: receivedMsg.messageId,
+                  peerId: receivedMsg.peerId,
+                  text: receivedMsg.text,
+                  timestamp: receivedMsg.timestamp,
+                  isOutgoing: false,
+                  status: MessageStatus.delivered,
+                );
+                cubit.addMessage(message);
+              });
+              return cubit;
+            },
           ),
         ],
         child: MaterialApp(

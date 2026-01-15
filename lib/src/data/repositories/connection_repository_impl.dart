@@ -1,6 +1,7 @@
 import '../../domain/entities/peer.dart';
 import '../../domain/entities/peer_identity.dart';
 import '../../domain/repositories/connection_repository.dart';
+import '../datasources/received_message.dart';
 import '../datasources/tcp_connection_data_source.dart';
 
 class ConnectionRepositoryImpl implements ConnectionRepository {
@@ -14,6 +15,10 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
   @override
   Stream<PeerIdentity> watchPeerIdentities() =>
       _dataSource.watchPeerIdentities();
+
+  @override
+  Stream<ReceivedMessage> watchReceivedMessages() =>
+      _dataSource.watchReceivedMessages();
 
   @override
   Future<void> startServer({required int port}) =>

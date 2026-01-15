@@ -14,6 +14,7 @@ import '../../core/protocol/beebeep_message_codec.dart';
 import '../../core/protocol/hello_payload.dart';
 import '../../domain/entities/peer.dart';
 import '../../domain/entities/peer_identity.dart';
+import 'received_message.dart';
 
 class TcpConnectionDataSource {
   TcpConnectionDataSource({
@@ -39,10 +40,13 @@ class TcpConnectionDataSource {
 
   final _logs = StreamController<String>.broadcast();
   final _peerIdentities = StreamController<PeerIdentity>.broadcast();
+  final _receivedMessages = StreamController<ReceivedMessage>.broadcast();
 
   Stream<String> watchLogs() => _logs.stream;
 
   Stream<PeerIdentity> watchPeerIdentities() => _peerIdentities.stream;
+
+  Stream<ReceivedMessage> watchReceivedMessages() => _receivedMessages.stream;
 
   ServerSocket? _server;
   final List<_BeeBeepConnection> _connections = <_BeeBeepConnection>[];
@@ -340,6 +344,7 @@ class TcpConnectionDataSource {
       onCryptoReady: _flushPendingChats,
       onClosed: _unbindPeerConnection,
       onLog: _log,
+      onReceivedMessage: (msg) => _receivedMessages.add(msg),
     );
 
     _connections.add(conn);
@@ -488,6 +493,7 @@ class _BeeBeepConnection {
     onCryptoReady,
     required void Function(String? peerId, _BeeBeepConnection conn) onClosed,
     required void Function(String) onLog,
+    required void Function(ReceivedMessage) onReceivedMessage,
   }) : _socket = socket,
        _isIncoming = isIncoming,
        _peerId = expectedPeerId,
@@ -503,7 +509,8 @@ class _BeeBeepConnection {
        _onPeerIdKnown = onPeerIdKnown,
        _onCryptoReady = onCryptoReady,
        _onClosed = onClosed,
-       _log = onLog;
+       _log = onLog,
+       _onReceivedMessage = onReceivedMessage;
 
   final Socket _socket;
   final bool _isIncoming;
@@ -522,6 +529,7 @@ class _BeeBeepConnection {
   final void Function(String peerId, _BeeBeepConnection conn) _onCryptoReady;
   final void Function(String? peerId, _BeeBeepConnection conn) _onClosed;
   final void Function(String) _log;
+  final void Function(ReceivedMessage) _onReceivedMessage;
 
   StreamSubscription<Uint8List>? _sub;
   Timer? _helloFallbackTimer;
@@ -654,6 +662,21 @@ class _BeeBeepConnection {
       _log(
         'RX BEE-CHAT id=${msg.id} flags=${msg.flags} text="$text" data="$dataPreview"',
       );
+
+      // Emit received message
+      final peerName = _peerHello?.displayName ?? 'Unknown';
+      final peerId = _peerId ?? '';
+      if (text.isNotEmpty && peerId.isNotEmpty) {
+        _onReceivedMessage(
+          ReceivedMessage(
+            peerId: peerId,
+            peerName: peerName,
+            text: text,
+            timestamp: DateTime.now(),
+            messageId: msg.id.toString(),
+          ),
+        );
+      }
       return;
     }
 

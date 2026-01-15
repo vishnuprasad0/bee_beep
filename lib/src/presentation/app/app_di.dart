@@ -15,6 +15,7 @@ import '../../domain/use_cases/stop_server.dart';
 import '../../domain/use_cases/watch_logs.dart';
 import '../../domain/use_cases/watch_peers.dart';
 import '../../domain/use_cases/watch_peer_identities.dart';
+import '../../domain/use_cases/watch_received_messages.dart';
 
 class AppDi {
   AppDi({required String displayName}) : _displayName = displayName;
@@ -55,6 +56,8 @@ class AppDi {
   late final WatchPeerIdentities watchPeerIdentities = WatchPeerIdentities(
     connectionRepository,
   );
+  late final WatchReceivedMessages watchReceivedMessages =
+      WatchReceivedMessages(connectionRepository);
 
   Future<void> startNode() async {
     // BeeBEEP defaults to TCP 6475 for chat/system messages.

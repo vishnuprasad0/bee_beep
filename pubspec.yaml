@@ -42,6 +42,9 @@ dependencies:
   flutter_bloc: ^8.1.6
   equatable: ^2.0.5
 
+  # Date formatting
+  intl: ^0.19.0
+
   # Crypto primitives (AES + SHA1/SHA3) and utilities
   pointycastle: ^4.0.0
 

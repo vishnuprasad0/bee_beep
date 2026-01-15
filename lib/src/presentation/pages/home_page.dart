@@ -3,11 +3,11 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../domain/entities/peer.dart';
 import '../../domain/use_cases/connect_to_peer.dart';
-import '../../domain/use_cases/send_chat_to_peer.dart';
 import '../bloc/logs/logs_cubit.dart';
 import '../bloc/logs/logs_state.dart';
 import '../bloc/peers/peers_cubit.dart';
 import '../bloc/peers/peers_state.dart';
+import 'chat_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -28,7 +28,6 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final connectToPeer = context.read<ConnectToPeer>();
-    final sendChatToPeer = context.read<SendChatToPeer>();
 
     return Scaffold(
       appBar: AppBar(title: const Text('BeeBEEP')),
@@ -48,8 +47,14 @@ class _HomePageState extends State<HomePage> {
                   }
                 },
                 onConnect: (peer) => connectToPeer(peer),
-                onSendHi: (peer) =>
-                    sendChatToPeer(peer: peer, text: 'Hi from BeeBEEP Dart'),
+                onOpenChat: (peer) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => ChatPage(peer: peer),
+                    ),
+                  );
+                },
               );
             },
           ),
@@ -93,7 +98,7 @@ class _PeersSection extends StatelessWidget {
     required this.errorMessage,
     required this.onToggleDiscovery,
     required this.onConnect,
-    required this.onSendHi,
+    required this.onOpenChat,
   });
 
   final bool isDiscovering;
@@ -101,7 +106,7 @@ class _PeersSection extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback onToggleDiscovery;
   final void Function(Peer peer) onConnect;
-  final void Function(Peer peer) onSendHi;
+  final void Function(Peer peer) onOpenChat;
 
   @override
   Widget build(BuildContext context) {
@@ -142,22 +147,33 @@ class _PeersSection extends StatelessWidget {
                       final peer = peers[index];
                       return ListTile(
                         dense: true,
-                        title: Text(peer.displayName),
-                        subtitle: Text('${peer.host}:${peer.port}'),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            TextButton(
-                              onPressed: () => onConnect(peer),
-                              child: const Text('Connect'),
+                        leading: CircleAvatar(
+                          backgroundColor: Theme.of(
+                            context,
+                          ).colorScheme.primaryContainer,
+                          child: Text(
+                            peer.displayName.isNotEmpty
+                                ? peer.displayName[0].toUpperCase()
+                                : '?',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onPrimaryContainer,
                             ),
-                            TextButton(
-                              onPressed: () => onSendHi(peer),
-                              child: const Text('Send Hi'),
-                            ),
-                          ],
+                          ),
                         ),
-                        onTap: () => onConnect(peer),
+                        title: Text(
+                          peer.displayName.isEmpty
+                              ? 'Unknown'
+                              : peer.displayName,
+                        ),
+                        subtitle: Text('${peer.host}:${peer.port}'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.power_settings_new),
+                          onPressed: () => onConnect(peer),
+                          tooltip: 'Connect',
+                        ),
+                        onTap: () => onOpenChat(peer),
                       );
                     },
                   ),

@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:beebeep/src/data/datasources/received_message.dart';
 import 'package:beebeep/src/domain/entities/peer.dart';
 import 'package:beebeep/src/domain/entities/peer_identity.dart';
 import 'package:beebeep/src/domain/repositories/connection_repository.dart';
@@ -50,6 +51,9 @@ class _FakeConnectionRepository implements ConnectionRepository {
 
   @override
   Stream<PeerIdentity> watchPeerIdentities() => _identities.stream;
+
+  @override
+  Stream<ReceivedMessage> watchReceivedMessages() => const Stream.empty();
 
   @override
   Future<void> startServer({required int port}) async {}
