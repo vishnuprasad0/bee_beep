@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:intl/intl.dart';
 
-import '../../domain/entities/peer.dart';
 import '../../domain/use_cases/connect_to_peer.dart';
+import '../bloc/chat/chat_cubit.dart';
+import '../bloc/chat/chat_state.dart';
 import '../bloc/logs/logs_cubit.dart';
-import '../bloc/logs/logs_state.dart';
 import '../bloc/peers/peers_cubit.dart';
 import '../bloc/peers/peers_state.dart';
 import 'chat_page.dart';
+import 'settings_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -30,156 +32,178 @@ class _HomePageState extends State<HomePage> {
     final connectToPeer = context.read<ConnectToPeer>();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('BeeBEEP')),
-      body: Column(
-        children: [
-          BlocBuilder<PeersCubit, PeersState>(
-            builder: (context, state) {
-              return _PeersSection(
-                isDiscovering: state.isDiscovering,
-                peers: state.peers,
-                errorMessage: state.errorMessage,
-                onToggleDiscovery: () {
-                  if (state.isDiscovering) {
-                    context.read<PeersCubit>().stop();
-                  } else {
-                    context.read<PeersCubit>().start();
-                  }
-                },
-                onConnect: (peer) => connectToPeer(peer),
-                onOpenChat: (peer) {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => ChatPage(peer: peer),
+      appBar: AppBar(
+        title: const Text('BeeBEEP'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const SettingsPage()),
+              );
+            },
+          ),
+        ],
+      ),
+      body: BlocBuilder<PeersCubit, PeersState>(
+        builder: (context, peersState) {
+          return BlocBuilder<ChatCubit, ChatState>(
+            builder: (context, chatState) {
+              final lastMessages = context.read<ChatCubit>().getLastMessages();
+
+              if (peersState.peers.isEmpty) {
+                return Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.people_outline,
+                        size: 64,
+                        color: Colors.grey[400],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No peers found',
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(color: Colors.grey[600]),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        peersState.isDiscovering
+                            ? 'Searching for peers...'
+                            : 'Tap the button below to discover',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Colors.grey[500],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+
+              return ListView.builder(
+                itemCount: peersState.peers.length,
+                itemBuilder: (context, index) {
+                  final peer = peersState.peers[index];
+                  final lastMessage = lastMessages[peer.id];
+
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: Theme.of(
+                        context,
+                      ).colorScheme.primaryContainer,
+                      child: Text(
+                        peer.displayName.isNotEmpty
+                            ? peer.displayName[0].toUpperCase()
+                            : '?',
+                        style: TextStyle(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onPrimaryContainer,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
+                    title: Text(
+                      peer.displayName.isEmpty ? 'Unknown' : peer.displayName,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: lastMessage != null
+                        ? Text(
+                            lastMessage.text,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: lastMessage.isOutgoing
+                                  ? Colors.grey[600]
+                                  : Colors.black87,
+                              fontWeight: lastMessage.isOutgoing
+                                  ? FontWeight.normal
+                                  : FontWeight.w600,
+                            ),
+                          )
+                        : Text(
+                            '${peer.host}:${peer.port}',
+                            style: TextStyle(color: Colors.grey[600]),
+                          ),
+                    trailing: lastMessage != null
+                        ? Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                _formatTime(lastMessage.timestamp),
+                                style: TextStyle(
+                                  color: Colors.grey[600],
+                                  fontSize: 12,
+                                ),
+                              ),
+                              if (!lastMessage.isOutgoing) ...[
+                                const SizedBox(height: 4),
+                                Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const SizedBox(width: 8, height: 8),
+                                ),
+                              ],
+                            ],
+                          )
+                        : const Icon(Icons.chevron_right, color: Colors.grey),
+                    onTap: () async {
+                      // Auto-connect before opening chat
+                      await connectToPeer(peer);
+                      if (context.mounted) {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => ChatPage(peer: peer),
+                          ),
+                        );
+                      }
+                    },
                   );
                 },
               );
             },
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: BlocBuilder<LogsCubit, LogsState>(
-              builder: (context, state) {
-                if (state.lines.isEmpty) {
-                  return const Center(child: Text('No logs yet'));
-                }
-                return ListView.builder(
-                  reverse: true,
-                  itemCount: state.lines.length,
-                  itemBuilder: (context, index) {
-                    final line = state.lines[state.lines.length - 1 - index];
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      child: Text(
-                        line,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-          ),
-        ],
+          );
+        },
+      ),
+      floatingActionButton: BlocBuilder<PeersCubit, PeersState>(
+        builder: (context, state) {
+          return FloatingActionButton.extended(
+            onPressed: () {
+              if (state.isDiscovering) {
+                context.read<PeersCubit>().stop();
+              } else {
+                context.read<PeersCubit>().start();
+              }
+            },
+            icon: Icon(state.isDiscovering ? Icons.stop : Icons.search),
+            label: Text(state.isDiscovering ? 'Stop' : 'Discover'),
+          );
+        },
       ),
     );
   }
-}
 
-class _PeersSection extends StatelessWidget {
-  const _PeersSection({
-    required this.isDiscovering,
-    required this.peers,
-    required this.errorMessage,
-    required this.onToggleDiscovery,
-    required this.onConnect,
-    required this.onOpenChat,
-  });
+  String _formatTime(DateTime time) {
+    final now = DateTime.now();
+    final difference = now.difference(time);
 
-  final bool isDiscovering;
-  final List<Peer> peers;
-  final String? errorMessage;
-  final VoidCallback onToggleDiscovery;
-  final void Function(Peer peer) onConnect;
-  final void Function(Peer peer) onOpenChat;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 220,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                Text('Peers', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                TextButton(
-                  onPressed: onToggleDiscovery,
-                  child: Text(isDiscovering ? 'Stop' : 'Discover'),
-                ),
-              ],
-            ),
-          ),
-          if (errorMessage != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  errorMessage!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            ),
-          Expanded(
-            child: peers.isEmpty
-                ? const Center(child: Text('No peers found'))
-                : ListView.builder(
-                    itemCount: peers.length,
-                    itemBuilder: (context, index) {
-                      final peer = peers[index];
-                      return ListTile(
-                        dense: true,
-                        leading: CircleAvatar(
-                          backgroundColor: Theme.of(
-                            context,
-                          ).colorScheme.primaryContainer,
-                          child: Text(
-                            peer.displayName.isNotEmpty
-                                ? peer.displayName[0].toUpperCase()
-                                : '?',
-                            style: TextStyle(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onPrimaryContainer,
-                            ),
-                          ),
-                        ),
-                        title: Text(
-                          peer.displayName.isEmpty
-                              ? 'Unknown'
-                              : peer.displayName,
-                        ),
-                        subtitle: Text('${peer.host}:${peer.port}'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.power_settings_new),
-                          onPressed: () => onConnect(peer),
-                          tooltip: 'Connect',
-                        ),
-                        onTap: () => onOpenChat(peer),
-                      );
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
+    if (difference.inDays == 0) {
+      return DateFormat.Hm().format(time);
+    } else if (difference.inDays == 1) {
+      return 'Yesterday';
+    } else if (difference.inDays < 7) {
+      return DateFormat.E().format(time);
+    } else {
+      return DateFormat.MMMd().format(time);
+    }
   }
 }

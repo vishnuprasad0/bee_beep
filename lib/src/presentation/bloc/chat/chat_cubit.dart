@@ -26,4 +26,20 @@ class ChatCubit extends Cubit<ChatState> {
     return state.messages.where((msg) => msg.peerId == peerId).toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
   }
+
+  ChatMessage? getLastMessageForPeer(String peerId) {
+    final messages = getMessagesForPeer(peerId);
+    return messages.isEmpty ? null : messages.last;
+  }
+
+  Map<String, ChatMessage> getLastMessages() {
+    final lastMessages = <String, ChatMessage>{};
+    for (final message in state.messages) {
+      final existing = lastMessages[message.peerId];
+      if (existing == null || message.timestamp.isAfter(existing.timestamp)) {
+        lastMessages[message.peerId] = message;
+      }
+    }
+    return lastMessages;
+  }
 }

@@ -235,12 +235,8 @@ class TcpConnectionDataSource {
   Future<void> connect(Peer peer) async {
     final peerId = '${peer.host}:${peer.port}';
     final existing = _connectionsByPeerId[peerId];
-    if (existing != null) {
+    if (existing != null && !existing.isClosed) {
       _log('Already connected to $peerId; skipping connect.');
-      return;
-    }
-    if (_hasActiveConnectionToHost(peer.host)) {
-      _log('Connection to ${peer.host} already active; skipping connect.');
       return;
     }
     _log('Connecting to ${peer.host}:${peer.port}');
@@ -372,16 +368,18 @@ class TcpConnectionDataSource {
   }
 
   void _unbindPeerConnection(String? peerId, _BeeBeepConnection conn) {
+    _connections.remove(conn);
+
     if (peerId != null) {
       final current = _connectionsByPeerId[peerId];
       if (identical(current, conn)) {
         _connectionsByPeerId.remove(peerId);
       }
     }
-  }
 
-  bool _hasActiveConnectionToHost(String host) {
-    return _connections.any((c) => c.remoteHost == host && !c.isClosed);
+    _log(
+      'Connection closed: ${peerId ?? "unknown"}, ${_connections.length} connections remaining',
+    );
   }
 
   void _flushPendingChats(String peerId, _BeeBeepConnection conn) {
@@ -546,7 +544,13 @@ class _BeeBeepConnection {
   // for the initial HELLO. Only switch to 32-bit after receiving peer's HELLO.
   QtFramePrefix _txPrefix = QtFramePrefix.u16be;
 
-  String get remoteHost => _socket.remoteAddress.address;
+  String? get remoteHost {
+    try {
+      return _socket.remoteAddress.address;
+    } catch (_) {
+      return null;
+    }
+  }
 
   bool get isIncoming => _isIncoming;
 
@@ -602,7 +606,11 @@ class _BeeBeepConnection {
 
     await _sub?.cancel();
     _sub = null;
-    _socket.destroy();
+    try {
+      _socket.destroy();
+    } catch (_) {
+      // Socket already closed
+    }
 
     _onClosed(_peerId, this);
   }
