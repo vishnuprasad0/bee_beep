@@ -12,5 +12,7 @@ abstract interface class ConnectionRepository {
 
   Future<void> connect(Peer peer);
 
+  Future<void> sendChat({required Peer peer, required String text});
+
   Future<void> disconnectAll();
 }

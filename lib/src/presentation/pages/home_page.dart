@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../domain/entities/peer.dart';
 import '../../domain/use_cases/connect_to_peer.dart';
+import '../../domain/use_cases/send_chat_to_peer.dart';
 import '../bloc/logs/logs_cubit.dart';
 import '../bloc/logs/logs_state.dart';
 import '../bloc/peers/peers_cubit.dart';
@@ -27,6 +28,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final connectToPeer = context.read<ConnectToPeer>();
+    final sendChatToPeer = context.read<SendChatToPeer>();
 
     return Scaffold(
       appBar: AppBar(title: const Text('BeeBEEP')),
@@ -46,6 +48,8 @@ class _HomePageState extends State<HomePage> {
                   }
                 },
                 onConnect: (peer) => connectToPeer(peer),
+                onSendHi: (peer) =>
+                    sendChatToPeer(peer: peer, text: 'Hi from BeeBEEP Dart'),
               );
             },
           ),
@@ -89,6 +93,7 @@ class _PeersSection extends StatelessWidget {
     required this.errorMessage,
     required this.onToggleDiscovery,
     required this.onConnect,
+    required this.onSendHi,
   });
 
   final bool isDiscovering;
@@ -96,6 +101,7 @@ class _PeersSection extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback onToggleDiscovery;
   final void Function(Peer peer) onConnect;
+  final void Function(Peer peer) onSendHi;
 
   @override
   Widget build(BuildContext context) {
@@ -138,7 +144,19 @@ class _PeersSection extends StatelessWidget {
                         dense: true,
                         title: Text(peer.displayName),
                         subtitle: Text('${peer.host}:${peer.port}'),
-                        trailing: const Icon(Icons.chevron_right),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: () => onConnect(peer),
+                              child: const Text('Connect'),
+                            ),
+                            TextButton(
+                              onPressed: () => onSendHi(peer),
+                              child: const Text('Send Hi'),
+                            ),
+                          ],
+                        ),
                         onTap: () => onConnect(peer),
                       );
                     },

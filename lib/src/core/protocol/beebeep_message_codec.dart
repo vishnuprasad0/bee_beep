@@ -10,28 +10,36 @@ class BeeBeepMessageCodec {
 
   final int protocolVersion;
 
-  Uint8List encodePlaintext(BeeBeepMessage message) {
+  Uint8List encodePlaintext(
+    BeeBeepMessage message, {
+    bool padToBlockSize = false,
+  }) {
     final header = beeBeepHeaderForType(message.type);
-    final textBytes = utf8.encode(message.text);
 
     final timestamp = _timestampToString(message.timestamp);
 
+    // BeeBEEP uses QString::size() which is character count, not byte count
     final payload = [
       header,
       message.id.toString(),
-      textBytes.length.toString(),
+      message.text.length.toString(), // Character count, not byte count!
       message.flags.toString(),
       message.data,
       timestamp,
       message.text,
     ].join(beeBeepProtocolFieldSeparator);
 
-    final padded = _padToBlockSize(utf8.encode(payload));
+    final bytes = utf8.encode(payload);
+    if (!padToBlockSize) {
+      return Uint8List.fromList(bytes);
+    }
+
+    final padded = _padToBlockSize(bytes);
     return Uint8List.fromList(padded);
   }
 
   BeeBeepMessage decodePlaintext(Uint8List bytes) {
-    final decoded = utf8.decode(bytes);
+    final decoded = utf8.decode(bytes, allowMalformed: true);
     final parts = decoded.split(beeBeepProtocolFieldSeparator);
     if (parts.length < 6) {
       return BeeBeepMessage(
@@ -79,10 +87,25 @@ class BeeBeepMessageCodec {
   String _timestampToString(DateTime timestamp) {
     if (protocolVersion >= beeBeepUtcTimestampProtocolVersion) {
       final utc = timestamp.toUtc();
-      return utc.toIso8601String();
+      return '${_toIsoDate(utc)}Z';
     }
     final local = timestamp.toLocal();
-    return local.toIso8601String();
+    return _toIsoDate(local);
+  }
+
+  /// Formats DateTime in Qt::ISODate format: yyyy-MM-ddThh:mm:ss
+  /// Note: Qt::ISODate does NOT include milliseconds!
+  String _toIsoDate(DateTime dt) {
+    String two(int v) => v.toString().padLeft(2, '0');
+
+    final y = dt.year.toString().padLeft(4, '0');
+    final m = two(dt.month);
+    final d = two(dt.day);
+    final h = two(dt.hour);
+    final min = two(dt.minute);
+    final s = two(dt.second);
+
+    return '$y-$m-${d}T$h:$min:$s';
   }
 
   DateTime _timestampFromString(String input) {

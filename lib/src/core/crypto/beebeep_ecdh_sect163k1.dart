@@ -13,7 +13,7 @@ class BeeBeepEcdhSect163k1 {
   BeeBeepEcdhSect163k1();
 
   static const int _m = 163;
-  static const int _byteLen = (_m + 7) ~/ 8;
+  static const int _byteLen = 24; // ECDH_PRIVATE_KEY_SIZE for K-163
 
   static final BigInt _a = BigInt.one;
 
@@ -23,11 +23,6 @@ class BeeBeepEcdhSect163k1 {
   );
   static final BigInt _gy = BigInt.parse(
     '0289070FB05D38FF58321F2E800536D538CCDAA3D9',
-    radix: 16,
-  );
-
-  static final BigInt _n = BigInt.parse(
-    '04000000000000000000020108A2E0CC0D99F8A5EF',
     radix: 16,
   );
 
@@ -51,21 +46,22 @@ class BeeBeepEcdhSect163k1 {
   Sect163k1KeyPair generateKeyPair() {
     final d = _randomScalar();
     final q = _scalarMult(d, _Point(_gx, _gy));
-    return Sect163k1KeyPair(privateKey: d, publicKey: _encodeUncompressed(q));
+    return Sect163k1KeyPair(
+      privateKey: d,
+      publicKey: _encodeBeeBeepPublicKey(q),
+    );
   }
 
   Uint8List computeSharedSecret({
     required BigInt privateKey,
     required Uint8List peerPublicKey,
   }) {
-    final peerPoint = _decodeUncompressed(peerPublicKey);
+    final peerPoint = _decodeBeeBeepPublicKey(peerPublicKey);
     final sharedPoint = _scalarMult(privateKey, peerPoint);
-    // BeeBEEP uses the raw shared field element bytes; we use x-coordinate.
-    return _bigIntToFixedLength(sharedPoint.x, _byteLen);
+    return _encodeBeeBeepPublicKey(sharedPoint);
   }
 
   /// BeeBEEP sends public keys as colon-separated decimal bytes.
-  /// This uses the standard uncompressed EC point encoding.
   String publicKeyToBeeBeepString(Uint8List publicKey) {
     return publicKey.map((b) => b.toString()).join(':');
   }
@@ -92,10 +88,10 @@ class BeeBeepEcdhSect163k1 {
     return out;
   }
 
-  Uint8List _bigIntToFixedLength(BigInt value, int length) {
+  Uint8List _bigIntToFixedLengthLe(BigInt value, int length) {
     final out = Uint8List(length);
     var v = value;
-    for (var i = length - 1; i >= 0; i--) {
+    for (var i = 0; i < length; i++) {
       out[i] = (v & BigInt.from(0xff)).toInt();
       v = v >> 8;
     }
@@ -108,39 +104,44 @@ class BeeBeepEcdhSect163k1 {
     for (var i = 0; i < bytes.length; i++) {
       bytes[i] = rnd.nextInt(256);
     }
-    var d = _bytesToBigInt(bytes);
-    d = d % (_n - BigInt.one);
-    return d + BigInt.one;
+    // Clear bits above curve degree (bits 163..191)
+    for (var bit = _m; bit < _byteLen * 8; bit++) {
+      final byteIndex = bit >> 3;
+      final bitIndex = bit & 7;
+      bytes[byteIndex] &= ~(1 << bitIndex);
+    }
+    var d = _bytesToBigIntLe(bytes);
+    if (d == BigInt.zero) {
+      d = BigInt.one;
+    }
+    return d;
   }
 
-  Uint8List _encodeUncompressed(_Point p) {
+  Uint8List _encodeBeeBeepPublicKey(_Point p) {
     if (p.isInfinity) {
       throw StateError('Cannot encode point at infinity');
     }
-    final x = _bigIntToFixedLength(p.x, _byteLen);
-    final y = _bigIntToFixedLength(p.y, _byteLen);
-    return Uint8List.fromList([0x04, ...x, ...y]);
+    final x = _bigIntToFixedLengthLe(p.x, _byteLen);
+    final y = _bigIntToFixedLengthLe(p.y, _byteLen);
+    return Uint8List.fromList([...x, ...y]);
   }
 
-  _Point _decodeUncompressed(Uint8List bytes) {
-    if (bytes.isEmpty || bytes[0] != 0x04) {
-      throw FormatException('Expected uncompressed point');
-    }
-    final expected = 1 + _byteLen + _byteLen;
+  _Point _decodeBeeBeepPublicKey(Uint8List bytes) {
+    final expected = _byteLen + _byteLen;
     if (bytes.length != expected) {
       throw FormatException('Unexpected point length');
     }
 
-    final x = _bytesToBigInt(bytes.sublist(1, 1 + _byteLen));
-    final y = _bytesToBigInt(bytes.sublist(1 + _byteLen, expected));
+    final x = _bytesToBigIntLe(bytes.sublist(0, _byteLen));
+    final y = _bytesToBigIntLe(bytes.sublist(_byteLen, expected));
     final p = _Point(x, y);
     return p;
   }
 
-  BigInt _bytesToBigInt(List<int> bytes) {
+  BigInt _bytesToBigIntLe(List<int> bytes) {
     var v = BigInt.zero;
-    for (final b in bytes) {
-      v = (v << 8) | BigInt.from(b);
+    for (var i = bytes.length - 1; i >= 0; i--) {
+      v = (v << 8) | BigInt.from(bytes[i]);
     }
     return v;
   }

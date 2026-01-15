@@ -34,7 +34,10 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
   @override
   Widget build(BuildContext context) {
     return MultiRepositoryProvider(
-      providers: [RepositoryProvider.value(value: widget.di.connectToPeer)],
+      providers: [
+        RepositoryProvider.value(value: widget.di.connectToPeer),
+        RepositoryProvider.value(value: widget.di.sendChatToPeer),
+      ],
       child: MultiBlocProvider(
         providers: [
           BlocProvider(

@@ -17,6 +17,16 @@ class ByteQueue {
     return Uint8List.fromList(_buffer.sublist(0, end));
   }
 
+  Uint8List peekRange(int start, int count) {
+    if (count <= 0) return Uint8List(0);
+    if (start < 0) return Uint8List(0);
+    if (start >= _buffer.length) return Uint8List(0);
+    final end = (start + count) > _buffer.length
+        ? _buffer.length
+        : start + count;
+    return Uint8List.fromList(_buffer.sublist(start, end));
+  }
+
   Uint8List read(int count) {
     if (count <= 0) return Uint8List(0);
     final end = count > _buffer.length ? _buffer.length : count;

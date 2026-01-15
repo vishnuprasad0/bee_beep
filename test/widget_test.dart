@@ -16,6 +16,7 @@ import 'package:beebeep/src/domain/entities/peer_identity.dart';
 import 'package:beebeep/src/domain/repositories/connection_repository.dart';
 import 'package:beebeep/src/domain/repositories/peer_discovery_repository.dart';
 import 'package:beebeep/src/domain/use_cases/connect_to_peer.dart';
+import 'package:beebeep/src/domain/use_cases/send_chat_to_peer.dart';
 import 'package:beebeep/src/domain/use_cases/start_discovery.dart';
 import 'package:beebeep/src/domain/use_cases/stop_discovery.dart';
 import 'package:beebeep/src/domain/use_cases/watch_logs.dart';
@@ -62,6 +63,11 @@ class _FakeConnectionRepository implements ConnectionRepository {
   }
 
   @override
+  Future<void> sendChat({required Peer peer, required String text}) async {
+    _controller.add('chat ${peer.displayName}: $text');
+  }
+
+  @override
   Future<void> disconnectAll() async {}
 }
 
@@ -72,7 +78,10 @@ void main() {
 
     await tester.pumpWidget(
       MultiRepositoryProvider(
-        providers: [RepositoryProvider.value(value: ConnectToPeer(connRepo))],
+        providers: [
+          RepositoryProvider.value(value: ConnectToPeer(connRepo)),
+          RepositoryProvider.value(value: SendChatToPeer(connRepo)),
+        ],
         child: MultiBlocProvider(
           providers: [
             BlocProvider(

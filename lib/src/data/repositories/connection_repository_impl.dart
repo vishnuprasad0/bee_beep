@@ -26,5 +26,9 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
   Future<void> connect(Peer peer) => _dataSource.connect(peer);
 
   @override
+  Future<void> sendChat({required Peer peer, required String text}) =>
+      _dataSource.sendChat(peer: peer, text: text);
+
+  @override
   Future<void> disconnectAll() => _dataSource.disconnectAll();
 }
