@@ -107,6 +107,10 @@ class AdaptiveQtFrameCodec {
   QtFramePrefix? get prefix => _prefix;
   int get bufferedBytes => _queue.length;
 
+  void setPrefix(QtFramePrefix? prefix) {
+    _prefix = prefix;
+  }
+
   void addChunk(Uint8List chunk) {
     _queue.add(chunk);
   }

@@ -214,7 +214,7 @@ class TcpConnectionDataSource {
         _log(
           'Incoming TCP from ${socket.remoteAddress.address}:${socket.remotePort}',
         );
-        _accept(socket);
+        _accept(socket, isIncoming: true);
       },
       onError: (e, st) => _log('Server error: $e'),
       cancelOnError: false,
@@ -229,6 +229,16 @@ class TcpConnectionDataSource {
   }
 
   Future<void> connect(Peer peer) async {
+    final peerId = '${peer.host}:${peer.port}';
+    final existing = _connectionsByPeerId[peerId];
+    if (existing != null) {
+      _log('Already connected to $peerId; skipping connect.');
+      return;
+    }
+    if (_hasActiveConnectionToHost(peer.host)) {
+      _log('Connection to ${peer.host} already active; skipping connect.');
+      return;
+    }
     _log('Connecting to ${peer.host}:${peer.port}');
     try {
       final socket = await Socket.connect(
@@ -241,6 +251,7 @@ class TcpConnectionDataSource {
         socket,
         expectedPeerId: '${peer.host}:${peer.port}',
         peerHostHint: peer.host,
+        isIncoming: false,
       );
       return;
     } catch (e) {
@@ -266,6 +277,7 @@ class TcpConnectionDataSource {
         socket,
         expectedPeerId: '${peer.host}:${peer.port}',
         peerHostHint: peer.host,
+        isIncoming: false,
       );
     } catch (e) {
       _log('Connect failed to 10.0.2.2:${peer.port}: $e');
@@ -305,9 +317,15 @@ class TcpConnectionDataSource {
     _log('Disconnected all');
   }
 
-  void _accept(Socket socket, {String? expectedPeerId, String? peerHostHint}) {
+  void _accept(
+    Socket socket, {
+    String? expectedPeerId,
+    String? peerHostHint,
+    required bool isIncoming,
+  }) {
     final conn = _BeeBeepConnection(
       socket: socket,
+      isIncoming: isIncoming,
       expectedPeerId: expectedPeerId,
       protocolVersion: _protocolVersion,
       dataStreamVersion: _dataStreamVersion,
@@ -333,6 +351,18 @@ class TcpConnectionDataSource {
   }
 
   void _bindPeerConnection(String peerId, _BeeBeepConnection conn) {
+    final existing = _connectionsByPeerId[peerId];
+    if (existing != null && !identical(existing, conn)) {
+      if (conn.isIncoming && !existing.isIncoming) {
+        _log('Duplicate connection for $peerId; keeping incoming connection.');
+        unawaited(existing.close());
+        _connectionsByPeerId[peerId] = conn;
+        return;
+      }
+      _log('Duplicate connection for $peerId; closing new connection.');
+      unawaited(conn.close());
+      return;
+    }
     _connectionsByPeerId[peerId] = conn;
   }
 
@@ -343,6 +373,10 @@ class TcpConnectionDataSource {
         _connectionsByPeerId.remove(peerId);
       }
     }
+  }
+
+  bool _hasActiveConnectionToHost(String host) {
+    return _connections.any((c) => c.remoteHost == host && !c.isClosed);
   }
 
   void _flushPendingChats(String peerId, _BeeBeepConnection conn) {
@@ -439,6 +473,7 @@ class TcpConnectionDataSource {
 class _BeeBeepConnection {
   _BeeBeepConnection({
     required Socket socket,
+    required bool isIncoming,
     required String? expectedPeerId,
     required int protocolVersion,
     required int dataStreamVersion,
@@ -454,6 +489,7 @@ class _BeeBeepConnection {
     required void Function(String? peerId, _BeeBeepConnection conn) onClosed,
     required void Function(String) onLog,
   }) : _socket = socket,
+       _isIncoming = isIncoming,
        _peerId = expectedPeerId,
        _messageCodec = BeeBeepMessageCodec(protocolVersion: protocolVersion),
        _protocolVersion = protocolVersion,
@@ -470,6 +506,7 @@ class _BeeBeepConnection {
        _log = onLog;
 
   final Socket _socket;
+  final bool _isIncoming;
   final AdaptiveQtFrameCodec _rxFramer = AdaptiveQtFrameCodec();
   final QtFrameCodec _txFramer = QtFrameCodec();
   final BeeBeepMessageCodec _messageCodec;
@@ -500,6 +537,12 @@ class _BeeBeepConnection {
   // BeeBEEP starts with m_protocolVersion=1, so it expects 16-bit prefix
   // for the initial HELLO. Only switch to 32-bit after receiving peer's HELLO.
   QtFramePrefix _txPrefix = QtFramePrefix.u16be;
+
+  String get remoteHost => _socket.remoteAddress.address;
+
+  bool get isIncoming => _isIncoming;
+
+  bool get isClosed => _closed;
 
   void start() {
     _sub = _socket.listen(
@@ -580,7 +623,24 @@ class _BeeBeepConnection {
       }
     }
 
-    final msg = _messageCodec.decodePlaintext(plaintext);
+    var msg = _messageCodec.decodePlaintext(plaintext);
+    if (msg.type == BeeBeepMessageType.undefined) {
+      try {
+        final decompressed = _messageCodec.maybeDecompress(
+          plaintext,
+          compressed: true,
+        );
+        final alt = _messageCodec.decodePlaintext(decompressed);
+        if (alt.type != BeeBeepMessageType.undefined) {
+          msg = alt;
+          _log(
+            'RX payload decompressed (${plaintext.length} -> ${decompressed.length} bytes)',
+          );
+        }
+      } catch (_) {
+        // Ignore: payload was not compressed or decompression failed.
+      }
+    }
     if (msg.type == BeeBeepMessageType.hello) {
       _handleHello(msg);
       return;
@@ -597,6 +657,13 @@ class _BeeBeepConnection {
       return;
     }
 
+    if (msg.type == BeeBeepMessageType.undefined) {
+      _log(
+        'RX unknown payload (${plaintext.length} bytes): ${_hexPreview(plaintext, maxBytes: 48)} text="${_textPreview(plaintext)}"',
+      );
+      return;
+    }
+
     _log(
       'RX ${beeBeepHeaderForType(msg.type)} id=${msg.id} flags=${msg.flags}',
     );
@@ -608,11 +675,16 @@ class _BeeBeepConnection {
       return false;
     }
 
+    final peerHash = _peerHello?.hash ?? '';
+    final flags = peerHash.isNotEmpty
+        ? beeBeepFlagBit(BeeBeepMessageFlag.private)
+        : 0;
+
     final message = BeeBeepMessage(
       type: BeeBeepMessageType.chat,
       id: _nextMessageId++,
-      flags: 0,
-      data: '',
+      flags: flags,
+      data: peerHash,
       timestamp: DateTime.now(),
       text: text,
     );
@@ -687,6 +759,12 @@ class _BeeBeepConnection {
     return sb.toString();
   }
 
+  String _textPreview(Uint8List bytes, {int maxChars = 120}) {
+    final decoded = utf8.decode(bytes, allowMalformed: true);
+    if (decoded.length <= maxChars) return decoded;
+    return '${decoded.substring(0, maxChars)}…';
+  }
+
   void _handleHello(BeeBeepMessage msg) {
     try {
       // BeeBEEP HELLO: payload in TEXT field, hash in DATA field
@@ -700,6 +778,7 @@ class _BeeBeepConnection {
       // Switch to 32-bit framing if peer supports it (proto > 60)
       if (peerProtoVersion > 60) {
         _txPrefix = QtFramePrefix.u32be;
+        _rxFramer.setPrefix(QtFramePrefix.u32be);
         _log('Switching TX framing to u32be for proto $peerProtoVersion');
       }
 
