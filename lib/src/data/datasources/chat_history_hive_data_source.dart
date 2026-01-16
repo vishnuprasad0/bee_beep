@@ -7,18 +7,18 @@ class ChatHistoryHiveDataSource {
   ChatHistoryHiveDataSource(this._box);
 
   static const String boxName = 'chat_history';
-  static const String _messagesKey = 'messages';
 
-  final Box<List<ChatMessage>> _box;
+  final Box<ChatMessage> _box;
 
   /// Loads all persisted messages.
   List<ChatMessage> loadMessages() {
-    return _box.get(_messagesKey, defaultValue: const <ChatMessage>[]) ??
-        const <ChatMessage>[];
+    final messages = _box.values.toList(growable: false);
+    messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    return messages;
   }
 
   /// Persists the provided messages list.
   Future<void> saveMessages(List<ChatMessage> messages) {
-    return _box.put(_messagesKey, messages);
+    return _box.clear().then((_) => _box.addAll(messages));
   }
 }

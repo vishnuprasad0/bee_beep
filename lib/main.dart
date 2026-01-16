@@ -6,15 +6,18 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import 'src/domain/entities/chat_message.dart';
 import 'src/data/datasources/chat_history_hive_data_source.dart';
+import 'src/data/datasources/peer_cache_hive_data_source.dart';
 import 'src/data/datasources/settings_local_data_source.dart';
 import 'src/data/models/chat_message_hive_adapter.dart';
 import 'src/data/repositories/chat_history_repository_impl.dart';
+import 'src/data/repositories/peer_cache_repository_impl.dart';
 import 'src/data/repositories/settings_repository_impl.dart';
 import 'src/presentation/app/app_di.dart';
 import 'src/presentation/bloc/chat/chat_cubit.dart';
 import 'src/presentation/bloc/logs/logs_cubit.dart';
 import 'src/presentation/bloc/peers/peers_cubit.dart';
 import 'src/presentation/pages/home_page.dart';
+import 'src/presentation/services/local_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,8 +28,11 @@ Future<void> main() async {
   final settingsBox = await Hive.openBox<String>(
     SettingsLocalDataSource.boxName,
   );
-  final chatHistoryBox = await Hive.openBox<List<ChatMessage>>(
+  final chatHistoryBox = await Hive.openBox<ChatMessage>(
     ChatHistoryHiveDataSource.boxName,
+  );
+  final peerCacheBox = await Hive.openBox<dynamic>(
+    PeerCacheHiveDataSource.boxName,
   );
 
   final settingsRepo = SettingsRepositoryImpl(
@@ -34,6 +40,9 @@ Future<void> main() async {
   );
   final chatHistoryRepo = ChatHistoryRepositoryImpl(
     ChatHistoryHiveDataSource(chatHistoryBox),
+  );
+  final peerCacheRepo = PeerCacheRepositoryImpl(
+    PeerCacheHiveDataSource(peerCacheBox),
   );
 
   final savedName = await settingsRepo.getDisplayName();
@@ -45,8 +54,10 @@ Future<void> main() async {
     displayName: displayName,
     settingsRepository: settingsRepo,
     chatHistoryRepository: chatHistoryRepo,
+    peerCacheRepository: peerCacheRepo,
   );
   await di.startNode();
+  await LocalNotificationService.instance.init();
 
   runApp(BeeBeepApp(di: di));
 }
@@ -60,11 +71,28 @@ class BeeBeepApp extends StatefulWidget {
   State<BeeBeepApp> createState() => _BeeBeepAppState();
 }
 
-class _BeeBeepAppState extends State<BeeBeepApp> {
+class _BeeBeepAppState extends State<BeeBeepApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    LocalNotificationService.instance.setForeground(true);
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.di.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final isForeground = state == AppLifecycleState.resumed;
+    LocalNotificationService.instance.setForeground(isForeground);
+    if (isForeground) {
+      unawaited(widget.di.ensureOnline());
+    }
   }
 
   @override
@@ -86,6 +114,10 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
               stopDiscovery: widget.di.stopDiscovery,
               watchPeers: widget.di.watchPeers,
               watchPeerIdentities: widget.di.watchPeerIdentities,
+              loadCachedPeers: widget.di.loadCachedPeers,
+              saveCachedPeers: widget.di.saveCachedPeers,
+              loadPeerDisplayNames: widget.di.loadPeerDisplayNames,
+              savePeerDisplayName: widget.di.savePeerDisplayName,
             ),
           ),
           BlocProvider(
@@ -114,6 +146,12 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
                   duration: receivedMsg.duration,
                 );
                 cubit.addMessage(message);
+                unawaited(
+                  LocalNotificationService.instance.showIncomingMessage(
+                    peerName: receivedMsg.peerName,
+                    message: message,
+                  ),
+                );
               });
               return cubit;
             },

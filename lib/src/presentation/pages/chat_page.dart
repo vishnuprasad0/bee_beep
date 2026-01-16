@@ -1,7 +1,13 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 import '../../domain/entities/chat_message.dart';
 import '../../domain/entities/peer.dart';
@@ -23,9 +29,26 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   final _textController = TextEditingController();
   final _scrollController = ScrollController();
+  final _recorder = AudioRecorder();
+
+  bool _isRecording = false;
+  DateTime? _recordStart;
+  String? _recordPath;
+  Duration _recordElapsed = Duration.zero;
+  Timer? _recordTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _textController.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   void dispose() {
+    _recordTimer?.cancel();
+    _recorder.dispose();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -55,11 +78,24 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Future<void> _sendFile() async {
-    final result = await FilePicker.platform.pickFiles(withData: true);
+    final result = await FilePicker.platform.pickFiles(
+      withData: true,
+      withReadStream: true,
+    );
     if (result == null || result.files.isEmpty) return;
 
     final file = result.files.single;
-    final bytes = file.bytes;
+    var bytes = file.bytes;
+    if (bytes == null && file.readStream != null) {
+      final builder = BytesBuilder();
+      await for (final chunk in file.readStream!) {
+        builder.add(chunk);
+      }
+      bytes = builder.takeBytes();
+    }
+    if (bytes == null && file.path != null) {
+      bytes = await File(file.path!).readAsBytes();
+    }
     if (bytes == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -74,7 +110,7 @@ class _ChatPageState extends State<ChatPage> {
       peer: widget.peer,
       fileName: file.name,
       bytes: bytes,
-      fileSize: file.size,
+      fileSize: file.size > 0 ? file.size : bytes.length,
     );
 
     final chatCubit = context.read<ChatCubit>();
@@ -94,30 +130,17 @@ class _ChatPageState extends State<ChatPage> {
     _scrollToBottom();
   }
 
-  Future<void> _sendVoiceMessage() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.audio,
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
-
-    final file = result.files.single;
-    final bytes = file.bytes;
-    if (bytes == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to read audio bytes')),
-        );
-      }
-      return;
-    }
-
+  Future<void> _sendVoiceFile(File file, Duration? duration) async {
+    final bytes = await file.readAsBytes();
     final sendVoiceMessage = context.read<SendVoiceMessageToPeer>();
     await sendVoiceMessage(
       peer: widget.peer,
-      fileName: file.name,
+      fileName: file.uri.pathSegments.isNotEmpty
+          ? file.uri.pathSegments.last
+          : 'voice.aac',
       bytes: bytes,
-      fileSize: file.size,
+      fileSize: bytes.length,
+      duration: duration,
     );
 
     final chatCubit = context.read<ChatCubit>();
@@ -129,12 +152,88 @@ class _ChatPageState extends State<ChatPage> {
       isOutgoing: true,
       status: MessageStatus.sent,
       type: MessageType.voice,
-      fileName: file.name,
-      fileSize: file.size,
+      fileName: file.uri.pathSegments.isNotEmpty
+          ? file.uri.pathSegments.last
+          : 'voice.aac',
+      fileSize: bytes.length,
       filePath: file.path,
+      duration: duration,
     );
     chatCubit.addMessage(message);
     _scrollToBottom();
+  }
+
+  Future<void> _startRecording() async {
+    if (_isRecording) return;
+    final hasPermission = await _recorder.hasPermission();
+    if (!hasPermission) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Microphone permission denied')),
+        );
+      }
+      return;
+    }
+
+    final dir = await getTemporaryDirectory();
+    final fileName =
+        'voice_${DateTime.now().millisecondsSinceEpoch.toString()}.aac';
+    final path = '${dir.path}/$fileName';
+
+    await _recorder.start(
+      const RecordConfig(encoder: AudioEncoder.aacLc),
+      path: path,
+    );
+
+    _recordTimer?.cancel();
+    _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final start = _recordStart ?? DateTime.now();
+      setState(() {
+        _recordElapsed = DateTime.now().difference(start);
+      });
+    });
+
+    setState(() {
+      _isRecording = true;
+      _recordStart = DateTime.now();
+      _recordPath = path;
+      _recordElapsed = Duration.zero;
+    });
+  }
+
+  Future<void> _stopRecording({required bool send}) async {
+    if (!_isRecording) return;
+    _recordTimer?.cancel();
+    await _recorder.stop();
+
+    final path = _recordPath;
+    final duration = _recordElapsed;
+
+    setState(() {
+      _isRecording = false;
+      _recordStart = null;
+      _recordPath = null;
+      _recordElapsed = Duration.zero;
+    });
+
+    if (path == null) return;
+    final file = File(path);
+    if (!send) {
+      if (file.existsSync()) {
+        await file.delete();
+      }
+      return;
+    }
+
+    if (!file.existsSync()) return;
+    await _sendVoiceFile(file, duration);
+  }
+
+  String _recordingLabel() {
+    final minutes = _recordElapsed.inMinutes;
+    final seconds = _recordElapsed.inSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
   void _scrollToBottom() {
@@ -165,20 +264,6 @@ class _ChatPageState extends State<ChatPage> {
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.attach_file),
-            onPressed: () {
-              _sendFile();
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.mic),
-            onPressed: () {
-              _sendVoiceMessage();
-            },
-          ),
-        ],
       ),
       body: Column(
         children: [
@@ -234,6 +319,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _buildMessageInput() {
+    final hasText = _textController.text.trim().isNotEmpty;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       decoration: BoxDecoration(
@@ -247,55 +333,102 @@ class _ChatPageState extends State<ChatPage> {
         ],
       ),
       child: SafeArea(
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.emoji_emotions_outlined),
-              onPressed: () {
-                final selection = _textController.selection;
-                final text = _textController.text;
-                final insertAt = selection.isValid
-                    ? selection.start
-                    : text.length;
-                final newText = text.replaceRange(insertAt, insertAt, '😊');
-                _textController.value = TextEditingValue(
-                  text: newText,
-                  selection: TextSelection.collapsed(
-                    offset: insertAt + '😊'.length,
-                  ),
-                );
-              },
-            ),
-            Expanded(
-              child: TextField(
-                controller: _textController,
-                decoration: InputDecoration(
-                  hintText: 'Type a message...',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor: Theme.of(
-                    context,
-                  ).colorScheme.surfaceContainerHighest,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 10,
-                  ),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 200),
+          child: _isRecording
+              ? Row(
+                  key: const ValueKey('recording'),
+                  children: [
+                    const SizedBox(width: 6),
+                    const Icon(Icons.mic, color: Colors.redAccent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Recording ${_recordingLabel()}',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () => _stopRecording(send: false),
+                    ),
+                    FloatingActionButton(
+                      mini: true,
+                      onPressed: () => _stopRecording(send: true),
+                      child: const Icon(Icons.send),
+                    ),
+                  ],
+                )
+              : Row(
+                  key: const ValueKey('composer'),
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.emoji_emotions_outlined),
+                      onPressed: () {
+                        final selection = _textController.selection;
+                        final text = _textController.text;
+                        final insertAt = selection.isValid
+                            ? selection.start
+                            : text.length;
+                        final newText = text.replaceRange(
+                          insertAt,
+                          insertAt,
+                          '😊',
+                        );
+                        _textController.value = TextEditingValue(
+                          text: newText,
+                          selection: TextSelection.collapsed(
+                            offset: insertAt + '😊'.length,
+                          ),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.attach_file),
+                      onPressed: _sendFile,
+                    ),
+                    Expanded(
+                      child: TextField(
+                        controller: _textController,
+                        decoration: InputDecoration(
+                          hintText: 'Type a message...',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                          filled: true,
+                          fillColor: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 10,
+                          ),
+                        ),
+                        maxLines: null,
+                        textCapitalization: TextCapitalization.sentences,
+                        onSubmitted: (_) => _sendMessage(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (hasText)
+                      FloatingActionButton(
+                        mini: true,
+                        onPressed: _sendMessage,
+                        child: const Icon(Icons.send),
+                      )
+                    else
+                      GestureDetector(
+                        onLongPressStart: (_) => _startRecording(),
+                        onLongPressEnd: (_) => _stopRecording(send: true),
+                        child: FloatingActionButton(
+                          mini: true,
+                          onPressed: _startRecording,
+                          child: const Icon(Icons.mic),
+                        ),
+                      ),
+                  ],
                 ),
-                maxLines: null,
-                textCapitalization: TextCapitalization.sentences,
-                onSubmitted: (_) => _sendMessage(),
-              ),
-            ),
-            const SizedBox(width: 8),
-            FloatingActionButton(
-              mini: true,
-              onPressed: _sendMessage,
-              child: const Icon(Icons.send),
-            ),
-          ],
         ),
       ),
     );
@@ -397,25 +530,29 @@ class _MessageBubble extends StatelessWidget {
           color: message.isOutgoing ? Colors.white : Colors.blue,
         ),
         const SizedBox(width: 8),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              message.fileName ?? 'File',
-              style: TextStyle(
-                color: message.isOutgoing ? Colors.white : Colors.black87,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            if (message.fileSize != null)
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               Text(
-                _formatFileSize(message.fileSize!),
+                message.fileName ?? 'File',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: message.isOutgoing ? Colors.white70 : Colors.black54,
-                  fontSize: 12,
+                  color: message.isOutgoing ? Colors.white : Colors.black87,
+                  fontWeight: FontWeight.w500,
                 ),
               ),
-          ],
+              if (message.fileSize != null)
+                Text(
+                  _formatFileSize(message.fileSize!),
+                  style: TextStyle(
+                    color: message.isOutgoing ? Colors.white70 : Colors.black54,
+                    fontSize: 12,
+                  ),
+                ),
+            ],
+          ),
         ),
       ],
     );
@@ -427,12 +564,16 @@ class _MessageBubble extends StatelessWidget {
       children: [
         Icon(Icons.mic, color: message.isOutgoing ? Colors.white : Colors.blue),
         const SizedBox(width: 8),
-        Text(
-          message.duration != null
-              ? _formatDuration(message.duration!)
-              : 'Voice message',
-          style: TextStyle(
-            color: message.isOutgoing ? Colors.white : Colors.black87,
+        Flexible(
+          child: Text(
+            message.duration != null
+                ? _formatDuration(message.duration!)
+                : 'Voice message',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: message.isOutgoing ? Colors.white : Colors.black87,
+            ),
           ),
         ),
       ],

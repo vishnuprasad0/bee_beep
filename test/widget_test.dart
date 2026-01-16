@@ -13,18 +13,29 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:beebeep/src/data/datasources/received_message.dart';
+import 'package:beebeep/src/domain/entities/chat_message.dart';
+import 'package:beebeep/src/domain/entities/cached_peer.dart';
 import 'package:beebeep/src/domain/entities/peer.dart';
 import 'package:beebeep/src/domain/entities/peer_identity.dart';
 import 'package:beebeep/src/domain/repositories/connection_repository.dart';
 import 'package:beebeep/src/domain/repositories/peer_discovery_repository.dart';
 import 'package:beebeep/src/domain/use_cases/connect_to_peer.dart';
+import 'package:beebeep/src/domain/use_cases/load_chat_history.dart';
+import 'package:beebeep/src/domain/use_cases/load_cached_peers.dart';
 import 'package:beebeep/src/domain/use_cases/send_chat_to_peer.dart';
+import 'package:beebeep/src/domain/use_cases/save_chat_history.dart';
+import 'package:beebeep/src/domain/use_cases/load_peer_display_names.dart';
+import 'package:beebeep/src/domain/use_cases/save_cached_peers.dart';
+import 'package:beebeep/src/domain/use_cases/save_peer_display_name.dart';
 import 'package:beebeep/src/domain/use_cases/start_discovery.dart';
 import 'package:beebeep/src/domain/use_cases/stop_discovery.dart';
 import 'package:beebeep/src/domain/use_cases/watch_logs.dart';
 import 'package:beebeep/src/domain/use_cases/watch_peers.dart';
 import 'package:beebeep/src/domain/use_cases/watch_peer_identities.dart';
+import 'package:beebeep/src/domain/repositories/chat_history_repository.dart';
+import 'package:beebeep/src/domain/repositories/peer_cache_repository.dart';
 import 'package:beebeep/src/presentation/bloc/logs/logs_cubit.dart';
+import 'package:beebeep/src/presentation/bloc/chat/chat_cubit.dart';
 import 'package:beebeep/src/presentation/bloc/peers/peers_cubit.dart';
 import 'package:beebeep/src/presentation/pages/home_page.dart';
 
@@ -90,6 +101,7 @@ class _FakeConnectionRepository implements ConnectionRepository {
     required Uint8List bytes,
     required int fileSize,
     String? mimeType,
+    Duration? duration,
   }) async {
     _controller.add('voice ${peer.displayName}: $fileName');
   }
@@ -98,10 +110,37 @@ class _FakeConnectionRepository implements ConnectionRepository {
   Future<void> disconnectAll() async {}
 }
 
+class _FakeChatHistoryRepository implements ChatHistoryRepository {
+  @override
+  Future<List<ChatMessage>> loadMessages() async => const <ChatMessage>[];
+
+  @override
+  Future<void> saveMessages(List<ChatMessage> messages) async {}
+}
+
+class _FakePeerCacheRepository implements PeerCacheRepository {
+  @override
+  Future<Map<String, CachedPeer>> loadAll() async => <String, CachedPeer>{};
+
+  @override
+  Future<void> savePeer(CachedPeer peer) async {}
+
+  @override
+  Future<void> savePeers(Iterable<CachedPeer> peers) async {}
+
+  @override
+  Future<void> saveDisplayName({
+    required String peerId,
+    required String displayName,
+  }) async {}
+}
+
 void main() {
   testWidgets('HomePage renders', (WidgetTester tester) async {
     final peerRepo = _FakePeerDiscoveryRepository();
     final connRepo = _FakeConnectionRepository();
+    final chatHistoryRepo = _FakeChatHistoryRepository();
+    final peerCacheRepo = _FakePeerCacheRepository();
 
     await tester.pumpWidget(
       MultiRepositoryProvider(
@@ -117,10 +156,20 @@ void main() {
                 stopDiscovery: StopDiscovery(peerRepo),
                 watchPeers: WatchPeers(peerRepo),
                 watchPeerIdentities: WatchPeerIdentities(connRepo),
+                loadCachedPeers: LoadCachedPeers(peerCacheRepo),
+                saveCachedPeers: SaveCachedPeers(peerCacheRepo),
+                loadPeerDisplayNames: LoadPeerDisplayNames(peerCacheRepo),
+                savePeerDisplayName: SavePeerDisplayName(peerCacheRepo),
               ),
             ),
             BlocProvider(
               create: (_) => LogsCubit(watchLogs: WatchLogs(connRepo)),
+            ),
+            BlocProvider(
+              create: (_) => ChatCubit(
+                loadChatHistory: LoadChatHistory(chatHistoryRepo),
+                saveChatHistory: SaveChatHistory(chatHistoryRepo),
+              ),
             ),
           ],
           child: const MaterialApp(home: HomePage()),
@@ -129,6 +178,6 @@ void main() {
     );
 
     await tester.pump();
-    expect(find.text('Peers'), findsOneWidget);
+    expect(find.text('BeeBEEP'), findsOneWidget);
   });
 }

@@ -1,0 +1,16 @@
+name: voice_message_recorder
+version: 0.0.1
+description: Local lightweight voice message recorder.
+publish_to: 'none'
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  record: ^6.1.2
+  path_provider: ^2.1.4
+
+flutter:
+  uses-material-design: true

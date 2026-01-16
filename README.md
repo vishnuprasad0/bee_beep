@@ -1,16 +1,76 @@
-# beebeep
+# BeeBEEP Flutter Client
 
-A new Flutter project.
+Simple LAN chat, file sharing, and voice messages for BeeBEEP‑style peers.
 
-## Getting Started
+## Workflow (simple words)
+1. **Start** the app and enable discovery.
+2. **Discover** peers on the same LAN.
+3. **Connect** to a peer and exchange HELLO messages.
+4. **Secure** the connection with ECDH keys.
+5. **Chat** with text, **send files**, or **record voice**.
+6. **Save** message history locally (Hive).
+7. **Notify** on new messages when the app is in background.
 
-This project is a starting point for a Flutter application.
+## Diagram
+```mermaid
+flowchart LR
+	A[App Start] --> B[Start TCP Server]
+	B --> C[Bonjour Discovery]
+	C --> D[Peer Found]
+	D --> E[Connect + HELLO]
+	E --> F[Secure Session (ECDH)]
+	F --> G[Chat / File / Voice]
+	G --> H[Persist to Hive]
+	G --> I[Local Notification]
+```
 
-A few resources to get you started if this is your first Flutter project:
+## Features
+- LAN peer discovery (Bonjour/mDNS).
+- Encrypted TCP chat.
+- File transfer (chunked) and voice messages.
+- Persistent message history (Hive).
+- Connection logs and simple settings UI.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+## Technical Notes
+- **Discovery:** mDNS (Bonjour) advertises `_beebeep._tcp` and scans LAN peers.
+- **Transport:** TCP sockets with Qt‑style framing (16/32‑bit prefixes).
+- **Handshake:** HELLO exchange, then ECDH session key.
+- **Encryption:** AES session cipher after ECDH; initial cipher for HELLO.
+- **Files/Voice:** Sent as chunked `BEE-FILE` frames with metadata.
+- **Persistence:** Chat history stored in Hive, peer display names cached.
+- **Default port:** 6475 (fallback to ephemeral if busy).
+- **Saved files:** app documents directory under `beebeep_files/`.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## File Structure (high level)
+```
+lib/
+	main.dart
+	src/
+		core/
+			crypto/
+			network/
+			protocol/
+		data/
+			datasources/
+			repositories/
+			models/
+		domain/
+			entities/
+			repositories/
+			use_cases/
+		presentation/
+			app/
+			bloc/
+			pages/
+			services/
+packages/
+	voice_message_recorder/
+```
+
+## License & Attribution
+This project is inspired by the BeeBEEP protocol and behavior.
+Please review the original BeeBEEP project and license before distribution:
+https://github.com/Stkai/BeeBEEP
+
+> If your release requires strict protocol compatibility or licensing
+> obligations, validate against BeeBEEP’s license and documentation.

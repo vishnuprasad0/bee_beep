@@ -15,6 +15,7 @@ class SendVoiceMessageToPeer {
     required Uint8List bytes,
     required int fileSize,
     String? mimeType,
+    Duration? duration,
   }) {
     return _repo.sendVoiceMessage(
       peer: peer,
@@ -22,6 +23,7 @@ class SendVoiceMessageToPeer {
       bytes: bytes,
       fileSize: fileSize,
       mimeType: mimeType,
+      duration: duration,
     );
   }
 }

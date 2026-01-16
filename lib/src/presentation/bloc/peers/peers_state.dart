@@ -1,6 +1,6 @@
 import 'package:equatable/equatable.dart';
 
-import '../../../domain/entities/peer.dart';
+import 'peer_presence.dart';
 
 class PeersState extends Equatable {
   const PeersState({
@@ -11,16 +11,16 @@ class PeersState extends Equatable {
 
   const PeersState.initial()
     : isDiscovering = false,
-      peers = const <Peer>[],
+      peers = const <PeerPresence>[],
       errorMessage = null;
 
   final bool isDiscovering;
-  final List<Peer> peers;
+  final List<PeerPresence> peers;
   final String? errorMessage;
 
   PeersState copyWith({
     bool? isDiscovering,
-    List<Peer>? peers,
+    List<PeerPresence>? peers,
     String? errorMessage,
   }) {
     return PeersState(

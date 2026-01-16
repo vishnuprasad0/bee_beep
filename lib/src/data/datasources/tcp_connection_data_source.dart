@@ -6,7 +6,10 @@ import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/digests/sha1.dart';
 
+import '../../core/crypto/beebeep_aes_ecb.dart';
 import '../../core/crypto/beebeep_crypto_session.dart';
+import '../../core/crypto/beebeep_hash.dart';
+import '../../core/crypto/hex.dart';
 import '../../core/crypto/beebeep_ecdh_sect163k1.dart';
 import '../../core/network/qt_frame_codec.dart';
 import '../../core/protocol/beebeep_constants.dart';
@@ -51,6 +54,8 @@ class TcpConnectionDataSource {
   Stream<ReceivedMessage> watchReceivedMessages() => _receivedMessages.stream;
 
   ServerSocket? _server;
+  ServerSocket? _fileServer;
+  int? _fileServerPort;
   final List<_BeeBeepConnection> _connections = <_BeeBeepConnection>[];
   final Map<String, _BeeBeepConnection> _connectionsByPeerId =
       <String, _BeeBeepConnection>{};
@@ -58,8 +63,14 @@ class TcpConnectionDataSource {
       <String, List<String>>{};
   final Map<String, List<_PendingFileTransfer>> _pendingFilesByPeerId =
       <String, List<_PendingFileTransfer>>{};
+  final Map<String, List<_PendingFileTransfer>> _pendingBeeBeepFilesByHost =
+      <String, List<_PendingFileTransfer>>{};
+  int _nextFileInfoId = DateTime.now().millisecondsSinceEpoch;
+  int _nextFileTransferMessageId = 1000;
 
   int? get serverPort => _server?.port;
+  bool get isServerRunning => _server != null;
+  String get localDisplayName => _localDisplayName;
 
   /// Updates the local display name for newly established connections.
   void updateLocalDisplayName(String displayName) {
@@ -71,6 +82,9 @@ class TcpConnectionDataSource {
 
   final BeeBeepEcdhSect163k1 _ecdh = BeeBeepEcdhSect163k1();
   late final Sect163k1KeyPair _localKeyPair = _ecdh.generateKeyPair();
+  late final BeeBeepMessageCodec _fileTransferCodec = BeeBeepMessageCodec(
+    protocolVersion: _protocolVersion,
+  );
 
   String _localHost = '';
 
@@ -202,6 +216,8 @@ class TcpConnectionDataSource {
     _localHost = await _bestLocalIpv4();
     _log('TCP server listening on :${_server!.port}');
 
+    await _startFileServer();
+
     final overridePort = _helloPortOverride();
     if (_helloHostOverride.isNotEmpty || overridePort != 0) {
       _log(
@@ -242,6 +258,213 @@ class TcpConnectionDataSource {
     _server = null;
     await s?.close();
     _log('TCP server stopped');
+
+    await _stopFileServer();
+  }
+
+  Future<void> _startFileServer() async {
+    if (_fileServer != null) return;
+
+    final preferred = (_server?.port ?? 0) + 1;
+    final preferredPort = (preferred > 0 && preferred < 65536) ? preferred : 0;
+
+    try {
+      _fileServer = await ServerSocket.bind(
+        InternetAddress.anyIPv4,
+        preferredPort,
+      );
+    } catch (_) {
+      _fileServer = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
+    }
+
+    _fileServerPort = _fileServer?.port;
+    _log('File server listening on :${_fileServerPort ?? 0}');
+
+    _fileServer?.listen(
+      (socket) => unawaited(_handleFileServerSocket(socket)),
+      onError: (e, st) => _log('File server error: $e'),
+      cancelOnError: false,
+    );
+  }
+
+  Future<void> _stopFileServer() async {
+    final s = _fileServer;
+    _fileServer = null;
+    _fileServerPort = null;
+    _pendingBeeBeepFilesByHost.clear();
+    await s?.close();
+  }
+
+  Future<void> _handleFileServerSocket(Socket socket) async {
+    final host = socket.remoteAddress.address;
+    final queue = _pendingBeeBeepFilesByHost[host];
+    if (queue == null || queue.isEmpty) {
+      socket.destroy();
+      return;
+    }
+
+    final transfer = queue.removeAt(0);
+    if (queue.isEmpty) {
+      _pendingBeeBeepFilesByHost.remove(host);
+    }
+
+    try {
+      final iterator = StreamIterator<List<int>>(socket);
+      final frameCodec = AdaptiveQtFrameCodec();
+      if (_protocolVersion > 60) {
+        frameCodec.setPrefix(QtFramePrefix.u32be);
+      }
+
+      final session = BeeBeepCryptoSession(
+        dataStreamVersion: _dataStreamVersion,
+      )..initializeDefaultCipher(_protocolVersion, passwordHex: _passwordHex);
+
+      final helloFrame = await _readNextFrame(
+        iterator,
+        frameCodec,
+        const Duration(seconds: 5),
+      );
+      if (helloFrame == null) {
+        _log('File server handshake failed: missing HELLO from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return;
+      }
+
+      final helloMessage = _decodeHelloMessage(helloFrame, session: session);
+      if (helloMessage == null) {
+        _log('File server handshake failed: invalid HELLO from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return;
+      }
+
+      final peerHello = HelloPayload.decodeText(helloMessage.text);
+      final encryptionDisabled =
+          (helloMessage.flags &
+              beeBeepFlagBit(BeeBeepMessageFlag.encryptionDisabled)) !=
+          0;
+
+      final keyPair = _ecdh.generateKeyPair();
+      final localPublicKey = _ecdh.publicKeyToBeeBeepString(keyPair.publicKey);
+      final peerPublicKey = _ecdh.publicKeyFromBeeBeepString(
+        peerHello.publicKey,
+      );
+      final sharedBytes = _ecdh.computeSharedSecret(
+        privateKey: keyPair.privateKey,
+        peerPublicKey: peerPublicKey,
+      );
+      final sharedKey = _sharedKeyFromBytes(sharedBytes);
+      final cipherKeyHex = _cipherKeyHexFromSharedKey(
+        sharedKey,
+        peerHello.dataStreamVersion,
+      );
+      final cipherKeyBytes = _buildAesKeyFromHex(
+        cipherKeyHex,
+        _protocolVersion,
+      );
+
+      final localHello = _buildHelloPayloadWithKey(
+        peerHello.port,
+        localPublicKey,
+      );
+      final answer = BeeBeepMessage(
+        type: BeeBeepMessageType.hello,
+        id: _protocolVersion,
+        flags: encryptionDisabled
+            ? beeBeepFlagBit(BeeBeepMessageFlag.encryptionDisabled)
+            : 0,
+        data: localHello.hash,
+        timestamp: DateTime.now(),
+        text: localHello.encodeText(),
+      );
+      final answerPlain = _fileTransferCodec.encodePlaintext(
+        answer,
+        padToBlockSize: true,
+      );
+      final answerEncrypted = encryptionDisabled
+          ? answerPlain
+          : session.encryptInitial(answerPlain);
+      final answerFrame = _encodeFileTransferFrame(answerEncrypted);
+      socket.add(answerFrame);
+      await socket.flush();
+
+      final requestFrame = await _readNextFrame(
+        iterator,
+        frameCodec,
+        const Duration(seconds: 8),
+      );
+      if (requestFrame == null) {
+        _log('File server timed out waiting for request from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return;
+      }
+
+      final requestPayload = encryptionDisabled
+          ? requestFrame
+          : _decryptBeeBeepBytes(requestFrame, cipherKeyBytes);
+      final request = _fileTransferCodec.decodePlaintext(requestPayload);
+      if (request.type == BeeBeepMessageType.file) {
+        _log('File server received request for "${request.text}" from $host');
+      }
+
+      final infoData =
+          transfer.beeBeepInfoData ??
+          _buildBeeBeepFileInfo(
+            transfer,
+            _fileServerPort ?? 0,
+            chatPrivateId: '',
+          );
+      final flags =
+          beeBeepFlagBit(BeeBeepMessageFlag.private) |
+          (transfer.isVoice
+              ? beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)
+              : 0);
+      final headerMessage = BeeBeepMessage(
+        type: BeeBeepMessageType.file,
+        id: _nextFileTransferMessageId++,
+        flags: flags,
+        data: infoData,
+        timestamp: DateTime.now(),
+        text: transfer.fileName,
+      );
+      final headerPlain = _fileTransferCodec.encodePlaintext(
+        headerMessage,
+        padToBlockSize: true,
+      );
+      final headerEncrypted = encryptionDisabled
+          ? headerPlain
+          : _encryptBeeBeepBytes(headerPlain, cipherKeyBytes);
+      final headerFrame = _encodeFileTransferFrame(headerEncrypted);
+      socket.add(headerFrame);
+      await socket.flush();
+
+      const chunkSize = 48 * 1024;
+      for (
+        var offset = 0;
+        offset < transfer.bytes.length;
+        offset += chunkSize
+      ) {
+        final end = (offset + chunkSize).clamp(0, transfer.bytes.length);
+        final chunk = transfer.bytes.sublist(offset, end);
+        final payload = encryptionDisabled
+            ? chunk
+            : _encryptBeeBeepBytes(chunk, cipherKeyBytes);
+        final frame = _encodeFileTransferFrame(payload);
+        socket.add(frame);
+        await socket.flush();
+      }
+
+      await iterator.cancel();
+      socket.destroy();
+      _log(
+        'File server sent ${transfer.fileSize} bytes to $host for ${transfer.fileName}',
+      );
+    } catch (e) {
+      _log('File server send failed: $e');
+      socket.destroy();
+    }
   }
 
   Future<void> connect(Peer peer) async {
@@ -342,6 +565,7 @@ class TcpConnectionDataSource {
     required String fileName,
     required Uint8List bytes,
     required int fileSize,
+    Duration? duration,
     String? mimeType,
   }) async {
     await _sendFileInternal(
@@ -352,6 +576,7 @@ class TcpConnectionDataSource {
         fileSize: fileSize,
         mimeType: mimeType,
         isVoice: true,
+        duration: duration,
       ),
     );
   }
@@ -416,6 +641,7 @@ class TcpConnectionDataSource {
       onCryptoReady: _flushPendingOutbound,
       onClosed: _unbindPeerConnection,
       onLog: _log,
+      onBeeBeepFileInfo: _prepareBeeBeepFileInfo,
       onReceivedMessage: (msg) => _receivedMessages.add(msg),
     );
 
@@ -505,6 +731,216 @@ class TcpConnectionDataSource {
     );
   }
 
+  String? _prepareBeeBeepFileInfo(
+    _PendingFileTransfer transfer,
+    HelloPayload? peerHello,
+    String? peerHost,
+  ) {
+    if (!_shouldUseBeeBeepFileTransfer(peerHello)) return null;
+    if (peerHost == null || peerHost.isEmpty) return null;
+
+    final port = _fileServerPort ?? 0;
+    if (port <= 0) return null;
+
+    _pendingBeeBeepFilesByHost
+        .putIfAbsent(peerHost, () => <_PendingFileTransfer>[])
+        .add(transfer);
+
+    return _buildBeeBeepFileInfo(
+      transfer,
+      port,
+      chatPrivateId: peerHello?.hash ?? '',
+    );
+  }
+
+  bool _shouldUseBeeBeepFileTransfer(HelloPayload? peerHello) {
+    if (peerHello == null) return false;
+    final version = peerHello.version.trim();
+    if (version.isEmpty) return false;
+    return int.tryParse(version) == null || version.contains('.');
+  }
+
+  String _buildBeeBeepFileInfo(
+    _PendingFileTransfer transfer,
+    int port, {
+    required String chatPrivateId,
+  }) {
+    final sha1 = SHA1Digest();
+    final hashBytes = sha1.process(transfer.bytes);
+    final hashHex = _bytesToHex(hashBytes);
+    final fileId = _nextFileInfoId++;
+    final password = '';
+    final now = DateTime.now().toUtc();
+    final lastModified = _formatIsoDateUtc(now);
+    final mimeType = _sanitizeBeeBeepField(transfer.mimeType ?? '');
+    final contentType = transfer.isVoice ? 1 : 0;
+    final durationMs = transfer.duration?.inMilliseconds ?? -1;
+
+    final data = [
+      port.toString(),
+      transfer.fileSize.toString(),
+      fileId.toString(),
+      _sanitizeBeeBeepField(password),
+      _sanitizeBeeBeepField(hashHex),
+      _sanitizeBeeBeepField(''),
+      '0',
+      _sanitizeBeeBeepField(chatPrivateId),
+      lastModified,
+      mimeType,
+      contentType.toString(),
+      '0',
+      durationMs.toString(),
+    ].join(beeBeepDataFieldSeparator);
+
+    transfer.beeBeepInfoData = data;
+    return data;
+  }
+
+  String _sanitizeBeeBeepField(String value) {
+    return value.replaceAll(beeBeepDataFieldSeparator, '_');
+  }
+
+  String _formatIsoDateUtc(DateTime dateTime) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    final y = dateTime.year.toString().padLeft(4, '0');
+    final m = two(dateTime.month);
+    final d = two(dateTime.day);
+    final h = two(dateTime.hour);
+    final min = two(dateTime.minute);
+    final s = two(dateTime.second);
+    return '$y-$m-${d}T$h:$min:${s}Z';
+  }
+
+  String _sharedKeyFromBytes(Uint8List bytes) {
+    final sb = StringBuffer();
+    for (final b in bytes) {
+      sb.write(b.toString());
+    }
+    final raw = utf8.encode(sb.toString());
+    return base64Url.encode(raw).replaceAll('=', '');
+  }
+
+  HelloPayload _buildHelloPayloadWithKey(int port, String publicKey) {
+    final hash = _generateUserHash(
+      _localDisplayName,
+      passwordHex: _passwordHex,
+      signature: _signature,
+    );
+
+    return HelloPayload(
+      port: port,
+      displayName: _localDisplayName,
+      status: 1,
+      statusDescription: '',
+      accountName: _localDisplayName,
+      publicKey: publicKey,
+      version: '$_protocolVersion',
+      hash: hash,
+      color: '#0000FF',
+      workgroups: '',
+      qtVersion: '6.5.0',
+      dataStreamVersion: _dataStreamVersion,
+      statusChangedIn: null,
+      domainName: '',
+      localHostName: Platform.localHostname,
+    );
+  }
+
+  Uint8List _encodeFileTransferFrame(Uint8List payload) {
+    if (_protocolVersion > 60) {
+      return QtFrameCodec().encodeFrame(payload);
+    }
+    return QtFrameCodec().encodeFrame16(payload);
+  }
+
+  Future<Uint8List?> _readNextFrame(
+    StreamIterator<List<int>> iterator,
+    AdaptiveQtFrameCodec codec,
+    Duration timeout,
+  ) async {
+    while (true) {
+      final moved = await Future.any([
+        iterator.moveNext(),
+        Future<bool>.delayed(timeout, () => false),
+      ]);
+      if (!moved) return null;
+      codec.addChunk(Uint8List.fromList(iterator.current));
+      final frames = codec.takeFrames();
+      if (frames.isNotEmpty) {
+        return frames.first;
+      }
+    }
+  }
+
+  BeeBeepMessage? _decodeHelloMessage(
+    Uint8List payload, {
+    required BeeBeepCryptoSession session,
+  }) {
+    try {
+      final decrypted = session.decryptInitial(payload);
+      final message = _fileTransferCodec.decodePlaintext(decrypted);
+      if (message.type == BeeBeepMessageType.hello) return message;
+    } catch (_) {}
+
+    final message = _fileTransferCodec.decodePlaintext(payload);
+    if (message.type == BeeBeepMessageType.hello) return message;
+    return null;
+  }
+
+  String _cipherKeyHexFromSharedKey(String sharedKey, int dataStreamVersion) {
+    final input = Uint8List.fromList(utf8.encode(sharedKey));
+    final digest = dataStreamVersion >= 13 ? sha3_256(input) : sha1(input);
+    return bytesToHex(digest);
+  }
+
+  Uint8List _buildAesKeyFromHex(String cipherKeyHex, int protocolVersion) {
+    const keyLength = beeBeepEncryptionKeyBits ~/ 8;
+    if (protocolVersion >= 80) {
+      final hexBytes = hexToBytes(cipherKeyHex);
+      final padded = Uint8List(keyLength);
+      final len = hexBytes.length > keyLength ? keyLength : hexBytes.length;
+      padded.setRange(0, len, hexBytes.sublist(0, len));
+      return padded;
+    }
+    return Uint8List(keyLength);
+  }
+
+  Uint8List _encryptBeeBeepBytes(Uint8List data, Uint8List key) {
+    if (key.isEmpty) return data;
+    final cipher = BeeBeepAesEcb(key: key);
+    final out = BytesBuilder();
+    const blockSize = beeBeepEncryptedDataBlockSize;
+    final fullBlocks = data.length ~/ blockSize;
+    for (var i = 0; i < fullBlocks; i++) {
+      final start = i * blockSize;
+      final block = Uint8List.fromList(data.sublist(start, start + blockSize));
+      out.add(cipher.encrypt(block));
+    }
+    final remainderStart = fullBlocks * blockSize;
+    if (remainderStart < data.length) {
+      out.add(data.sublist(remainderStart));
+    }
+    return out.takeBytes();
+  }
+
+  Uint8List _decryptBeeBeepBytes(Uint8List data, Uint8List key) {
+    if (key.isEmpty) return data;
+    final cipher = BeeBeepAesEcb(key: key);
+    final out = BytesBuilder();
+    const blockSize = beeBeepEncryptedDataBlockSize;
+    final fullBlocks = data.length ~/ blockSize;
+    for (var i = 0; i < fullBlocks; i++) {
+      final start = i * blockSize;
+      final block = Uint8List.fromList(data.sublist(start, start + blockSize));
+      out.add(cipher.decrypt(block));
+    }
+    final remainderStart = fullBlocks * blockSize;
+    if (remainderStart < data.length) {
+      out.add(data.sublist(remainderStart));
+    }
+    return out.takeBytes();
+  }
+
   String _generateUserHash(
     String username, {
     required String passwordHex,
@@ -562,6 +998,7 @@ class _PendingFileTransfer {
     required this.fileSize,
     required this.isVoice,
     this.mimeType,
+    this.duration,
   });
 
   final String fileName;
@@ -569,6 +1006,44 @@ class _PendingFileTransfer {
   final int fileSize;
   final bool isVoice;
   final String? mimeType;
+  final Duration? duration;
+  String? beeBeepInfoData;
+}
+
+class _BeeBeepFileInfo {
+  const _BeeBeepFileInfo({
+    required this.port,
+    required this.fileSize,
+    required this.fileName,
+    required this.id,
+    required this.password,
+    required this.fileHash,
+    required this.shareFolder,
+    required this.isInShareBox,
+    required this.chatPrivateId,
+    required this.lastModified,
+    required this.lastModifiedRaw,
+    required this.mimeType,
+    required this.contentType,
+    required this.startingPosition,
+    required this.duration,
+  });
+
+  final int port;
+  final int fileSize;
+  final String fileName;
+  final int id;
+  final String password;
+  final String fileHash;
+  final String shareFolder;
+  final bool isInShareBox;
+  final String chatPrivateId;
+  final DateTime? lastModified;
+  final String lastModifiedRaw;
+  final String mimeType;
+  final int contentType;
+  final int startingPosition;
+  final int duration;
 }
 
 class _BeeBeepConnection {
@@ -589,12 +1064,20 @@ class _BeeBeepConnection {
     onCryptoReady,
     required void Function(String? peerId, _BeeBeepConnection conn) onClosed,
     required void Function(String) onLog,
+    required String? Function(
+      _PendingFileTransfer transfer,
+      HelloPayload? peerHello,
+      String? peerHost,
+    )
+    onBeeBeepFileInfo,
     required void Function(ReceivedMessage) onReceivedMessage,
   }) : _socket = socket,
        _isIncoming = isIncoming,
        _peerId = expectedPeerId,
        _messageCodec = BeeBeepMessageCodec(protocolVersion: protocolVersion),
        _protocolVersion = protocolVersion,
+       _dataStreamVersion = dataStreamVersion,
+       _passwordHex = passwordHex,
        _cryptoSession = BeeBeepCryptoSession(
          dataStreamVersion: dataStreamVersion,
        )..initializeDefaultCipher(1, passwordHex: passwordHex),
@@ -606,6 +1089,7 @@ class _BeeBeepConnection {
        _onCryptoReady = onCryptoReady,
        _onClosed = onClosed,
        _log = onLog,
+       _onBeeBeepFileInfo = onBeeBeepFileInfo,
        _onReceivedMessage = onReceivedMessage;
 
   final Socket _socket;
@@ -613,9 +1097,14 @@ class _BeeBeepConnection {
   final AdaptiveQtFrameCodec _rxFramer = AdaptiveQtFrameCodec();
   final QtFrameCodec _txFramer = QtFrameCodec();
   final BeeBeepMessageCodec _messageCodec;
+  late final BeeBeepMessageCodec _fileTransferCodec = BeeBeepMessageCodec(
+    protocolVersion: _protocolVersion,
+  );
   // Kept for protocol-dependent behavior in future parsing.
   // ignore: unused_field
   final int _protocolVersion;
+  final int _dataStreamVersion;
+  final String _passwordHex;
   final BeeBeepCryptoSession _cryptoSession;
   final HelloPayload _localHello;
   final dynamic _localPrivateKey;
@@ -625,6 +1114,12 @@ class _BeeBeepConnection {
   final void Function(String peerId, _BeeBeepConnection conn) _onCryptoReady;
   final void Function(String? peerId, _BeeBeepConnection conn) _onClosed;
   final void Function(String) _log;
+  final String? Function(
+    _PendingFileTransfer transfer,
+    HelloPayload? peerHello,
+    String? peerHost,
+  )
+  _onBeeBeepFileInfo;
   final void Function(ReceivedMessage) _onReceivedMessage;
 
   StreamSubscription<Uint8List>? _sub;
@@ -633,6 +1128,7 @@ class _BeeBeepConnection {
   bool _closed = false;
   int _nextMessageId = 1000;
   String? _peerId;
+  Future<void> _txChain = Future.value();
   // ignore: unused_field
   HelloPayload? _peerHello;
 
@@ -641,6 +1137,9 @@ class _BeeBeepConnection {
   // BeeBEEP starts with m_protocolVersion=1, so it expects 16-bit prefix
   // for the initial HELLO. Only switch to 32-bit after receiving peer's HELLO.
   QtFramePrefix _txPrefix = QtFramePrefix.u16be;
+
+  static const int _fileChunkSize = 48 * 1024;
+  final Map<String, _IncomingFileBuffer> _incomingFiles = {};
 
   String? get remoteHost {
     try {
@@ -791,6 +1290,12 @@ class _BeeBeepConnection {
       return;
     }
 
+    if (msg.type == BeeBeepMessageType.ping) {
+      _log('RX BEE-PING id=${msg.id} flags=${msg.flags}');
+      _sendPong(msg);
+      return;
+    }
+
     if (msg.type == BeeBeepMessageType.undefined) {
       _log(
         'RX unknown payload (${plaintext.length} bytes): ${_hexPreview(plaintext, maxBytes: 48)} text="${_textPreview(plaintext)}"',
@@ -801,6 +1306,19 @@ class _BeeBeepConnection {
     _log(
       'RX ${beeBeepHeaderForType(msg.type)} id=${msg.id} flags=${msg.flags}',
     );
+  }
+
+  void _sendPong(BeeBeepMessage ping) {
+    final message = BeeBeepMessage(
+      type: BeeBeepMessageType.pong,
+      id: ping.id,
+      flags: ping.flags,
+      data: ping.data,
+      timestamp: DateTime.now(),
+      text: ping.text,
+    );
+    _sendMessage(message);
+    _log('TX BEE-PONG id=${message.id}');
   }
 
   bool sendChatText(String text) {
@@ -835,36 +1353,135 @@ class _BeeBeepConnection {
       return false;
     }
 
+    final peerHost = remoteHost;
+    final beeBeepFileInfo = _onBeeBeepFileInfo(transfer, _peerHello, peerHost);
+    if (beeBeepFileInfo != null) {
+      final flags =
+          beeBeepFlagBit(BeeBeepMessageFlag.private) |
+          (transfer.isVoice
+              ? beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)
+              : 0);
+
+      final message = BeeBeepMessage(
+        type: BeeBeepMessageType.file,
+        id: _nextMessageId++,
+        flags: flags,
+        data: beeBeepFileInfo,
+        timestamp: DateTime.now(),
+        text: transfer.fileName,
+      );
+
+      _sendMessage(message);
+      _log(
+        'TX BEE-FILE (BeeBEEP) name="${transfer.fileName}" size=${transfer.fileSize} portInfo sent',
+      );
+      return true;
+    }
+
     final flags = transfer.isVoice
         ? beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)
         : 0;
 
-    final meta = <String, Object?>{
-      'name': transfer.fileName,
-      'size': transfer.fileSize,
-      'mime': transfer.mimeType,
-      'voice': transfer.isVoice,
-    };
-
-    final message = BeeBeepMessage(
-      type: BeeBeepMessageType.file,
-      id: _nextMessageId++,
-      flags: flags,
-      data: base64Encode(transfer.bytes),
-      timestamp: DateTime.now(),
-      text: jsonEncode(meta),
+    final totalParts = (transfer.bytes.length / _fileChunkSize).ceil().clamp(
+      1,
+      1 << 30,
     );
+    final transferId =
+        '${DateTime.now().millisecondsSinceEpoch}_${_nextMessageId}';
 
-    _sendMessage(message);
+    for (var index = 0; index < totalParts; index++) {
+      final start = index * _fileChunkSize;
+      final end = (start + _fileChunkSize).clamp(0, transfer.bytes.length);
+      final chunk = transfer.bytes.sublist(start, end);
+
+      final meta = <String, Object?>{
+        'name': transfer.fileName,
+        'size': transfer.fileSize,
+        'mime': transfer.mimeType,
+        'voice': transfer.isVoice,
+        'durationMs': transfer.duration?.inMilliseconds,
+        'transferId': transferId,
+        'partIndex': index,
+        'totalParts': totalParts,
+      };
+
+      final message = BeeBeepMessage(
+        type: BeeBeepMessageType.file,
+        id: _nextMessageId++,
+        flags: flags,
+        data: base64Encode(chunk),
+        timestamp: DateTime.now(),
+        text: jsonEncode(meta),
+      );
+
+      _sendMessage(message);
+    }
+
     _log(
-      'TX BEE-FILE id=${message.id} name="${transfer.fileName}" size=${transfer.fileSize} voice=${transfer.isVoice}',
+      'TX BEE-FILE name="${transfer.fileName}" size=${transfer.fileSize} voice=${transfer.isVoice} parts=$totalParts',
     );
     return true;
   }
 
   Future<void> _handleFileMessage(BeeBeepMessage msg) async {
     try {
-      final meta = _parseFileMeta(msg.text);
+      final info = _tryParseBeeBeepFileInfo(msg);
+      if (info != null) {
+        final host = remoteHost ?? '';
+        if (host.isEmpty) {
+          _log('RX BEE-FILE missing peer host for transfer');
+          return;
+        }
+
+        final isVoice =
+            (msg.flags & beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)) !=
+                0 ||
+            info.contentType == 1;
+        final bytes = await _downloadBeeBeepFile(host: host, info: info);
+        if (bytes == null || bytes.isEmpty) {
+          _log('RX BEE-FILE download failed from $host:${info.port}');
+          return;
+        }
+
+        final savedPath = await _persistIncomingFile(
+          fileName: info.fileName,
+          bytes: bytes,
+          isVoice: isVoice,
+        );
+
+        final peerName = _peerHello?.displayName ?? 'Unknown';
+        final peerId = _peerId ?? '';
+        if (peerId.isEmpty) return;
+
+        _onReceivedMessage(
+          ReceivedMessage(
+            peerId: peerId,
+            peerName: peerName,
+            text: isVoice ? 'Voice message' : info.fileName,
+            timestamp: DateTime.now(),
+            messageId: msg.id.toString(),
+            type: isVoice ? MessageType.voice : MessageType.file,
+            filePath: savedPath,
+            fileSize: info.fileSize,
+            fileName: info.fileName,
+          ),
+        );
+
+        _log(
+          'RX BEE-FILE download complete name="${info.fileName}" size=${info.fileSize} saved="$savedPath"',
+        );
+        return;
+      }
+
+      final metaFromText = _parseFileMeta(msg.text);
+      final metaFromData = _parseFileMeta(msg.data);
+      final meta = metaFromText.isNotEmpty ? metaFromText : metaFromData;
+
+      final payload = _tryBase64Decode(msg.data) ?? _tryBase64Decode(msg.text);
+      if (payload == null || payload.isEmpty) {
+        _log('RX BEE-FILE missing base64 payload id=${msg.id}');
+        return;
+      }
       final isVoice =
           (msg.flags & beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)) != 0 ||
           (meta['voice'] == true);
@@ -873,12 +1490,74 @@ class _BeeBeepConnection {
           ? rawName.trim()
           : 'file';
 
-      final bytes = base64Decode(msg.data);
+      final transferId = meta['transferId'] as String?;
+      final partIndex = _asInt(meta['partIndex']);
+      final totalParts = _asInt(meta['totalParts']);
+
+      final bytes = payload;
       final rawSize = meta['size'];
       final fileSize = rawSize is int
           ? rawSize
           : (rawSize is num ? rawSize.toInt() : bytes.length);
       final durationMs = meta['durationMs'] as int?;
+
+      if (transferId != null && partIndex != null && totalParts != null) {
+        final buffer = _incomingFiles.putIfAbsent(
+          transferId,
+          () => _IncomingFileBuffer(
+            fileName: fileName,
+            totalParts: totalParts,
+            fileSize: fileSize,
+            isVoice: isVoice,
+            durationMs: durationMs,
+          ),
+        );
+
+        buffer.addPart(partIndex, bytes);
+        _purgeOldIncoming();
+
+        if (!buffer.isComplete) {
+          _log(
+            'RX BEE-FILE part ${partIndex + 1}/$totalParts name="$fileName"',
+          );
+          return;
+        }
+
+        final assembled = buffer.assemble();
+        _incomingFiles.remove(transferId);
+
+        final savedPath = await _persistIncomingFile(
+          fileName: fileName,
+          bytes: assembled,
+          isVoice: isVoice,
+        );
+
+        final peerName = _peerHello?.displayName ?? 'Unknown';
+        final peerId = _peerId ?? '';
+        if (peerId.isEmpty) return;
+
+        _onReceivedMessage(
+          ReceivedMessage(
+            peerId: peerId,
+            peerName: peerName,
+            text: isVoice ? 'Voice message' : fileName,
+            timestamp: DateTime.now(),
+            messageId: msg.id.toString(),
+            type: isVoice ? MessageType.voice : MessageType.file,
+            filePath: savedPath,
+            fileSize: fileSize,
+            fileName: fileName,
+            duration: durationMs != null
+                ? Duration(milliseconds: durationMs)
+                : null,
+          ),
+        );
+
+        _log(
+          'RX BEE-FILE complete name="$fileName" size=$fileSize voice=$isVoice saved="$savedPath"',
+        );
+        return;
+      }
 
       final savedPath = await _persistIncomingFile(
         fileName: fileName,
@@ -916,6 +1595,8 @@ class _BeeBeepConnection {
   }
 
   Map<String, Object?> _parseFileMeta(String text) {
+    if (text.trim().isEmpty) return <String, Object?>{};
+
     try {
       final raw = jsonDecode(text);
       if (raw is Map<String, dynamic>) {
@@ -924,7 +1605,438 @@ class _BeeBeepConnection {
     } catch (_) {
       // Ignore parsing errors.
     }
-    return <String, Object?>{};
+
+    final parts = text
+        .split(RegExp('[\u2028\n\r]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList(growable: false);
+    if (parts.isEmpty) return <String, Object?>{};
+
+    String? fileName;
+    int? fileSize;
+
+    for (final part in parts) {
+      final numeric = int.tryParse(part);
+      if (numeric != null) {
+        if (fileSize == null || numeric > fileSize) {
+          fileSize = numeric;
+        }
+        continue;
+      }
+
+      final trimmed = part.replaceAll('\\', '/');
+      if (trimmed.contains('/')) {
+        final basename = trimmed.split('/').last;
+        if (basename.isNotEmpty && !_looksLikeHex(basename)) {
+          fileName = basename;
+          continue;
+        }
+      }
+
+      if (part.contains('.') && !_looksLikeHex(part)) {
+        fileName = part;
+      }
+    }
+
+    return <String, Object?>{
+      if (fileName != null) 'name': fileName,
+      if (fileSize != null) 'size': fileSize,
+    };
+  }
+
+  _BeeBeepFileInfo? _tryParseBeeBeepFileInfo(BeeBeepMessage msg) {
+    final raw = msg.data.trim();
+    if (raw.isEmpty) return null;
+
+    final parts = raw
+        .split(RegExp('[\u2028\n\r]+'))
+        .map((e) => e.trim())
+        .toList(growable: false);
+
+    if (parts.length < 4) return null;
+
+    final port = int.tryParse(parts[0]) ?? 0;
+    final size = int.tryParse(parts[1]) ?? 0;
+    final id = int.tryParse(parts[2]) ?? 0;
+    final password = parts[3];
+    if (port <= 0 || size <= 0) return null;
+
+    final fileHash = parts.length > 4 ? parts[4] : '';
+    final shareFolder = parts.length > 5 ? parts[5] : '';
+    final isInShareBox = parts.length > 6 ? parts[6] == '1' : false;
+    final chatPrivateId = parts.length > 7 ? parts[7] : '';
+    final lastModifiedRaw = parts.length > 8 ? parts[8] : '';
+    final lastModified = lastModifiedRaw.isEmpty
+        ? null
+        : DateTime.tryParse(lastModifiedRaw);
+    final mimeType = parts.length > 9 ? parts[9] : '';
+    final contentType = parts.length > 10 ? int.tryParse(parts[10]) ?? 0 : 0;
+    final startingPosition = parts.length > 11
+        ? int.tryParse(parts[11]) ?? 0
+        : 0;
+    final duration = parts.length > 12 ? int.tryParse(parts[12]) ?? -1 : -1;
+
+    final fileName = msg.text.trim().isNotEmpty
+        ? msg.text.trim()
+        : (parts.length > 13 ? parts[13] : 'file');
+
+    return _BeeBeepFileInfo(
+      port: port,
+      fileSize: size,
+      fileName: fileName,
+      id: id,
+      password: password,
+      fileHash: fileHash,
+      shareFolder: shareFolder,
+      isInShareBox: isInShareBox,
+      chatPrivateId: chatPrivateId,
+      lastModified: lastModified,
+      lastModifiedRaw: lastModifiedRaw,
+      mimeType: mimeType,
+      contentType: contentType,
+      startingPosition: startingPosition,
+      duration: duration,
+    );
+  }
+
+  Uint8List? _tryBase64Decode(String input) {
+    final trimmed = input.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      return base64Decode(trimmed);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _looksLikeHex(String value) {
+    final trimmed = value.trim();
+    if (trimmed.length < 8) return false;
+    final hex = RegExp(r'^[0-9a-fA-F]+$');
+    return hex.hasMatch(trimmed);
+  }
+
+  Future<Uint8List?> _downloadBeeBeepFile({
+    required String host,
+    required _BeeBeepFileInfo info,
+  }) async {
+    try {
+      final socket = await Socket.connect(
+        host,
+        info.port,
+        timeout: const Duration(seconds: 5),
+      );
+
+      final iterator = StreamIterator<List<int>>(socket);
+      final frameCodec = AdaptiveQtFrameCodec();
+      if (_protocolVersion > 60) {
+        frameCodec.setPrefix(QtFramePrefix.u32be);
+      }
+
+      final session = BeeBeepCryptoSession(
+        dataStreamVersion: _dataStreamVersion,
+      )..initializeDefaultCipher(_protocolVersion, passwordHex: _passwordHex);
+
+      final keyPair = _ecdh.generateKeyPair();
+      final localPublicKey = _ecdh.publicKeyToBeeBeepString(keyPair.publicKey);
+      final localHello = _buildHelloPayloadWithKey(localPublicKey);
+      final helloMessage = BeeBeepMessage(
+        type: BeeBeepMessageType.hello,
+        id: _protocolVersion,
+        flags: 0,
+        data: localHello.hash,
+        timestamp: DateTime.now(),
+        text: localHello.encodeText(),
+      );
+      final helloPlain = _fileTransferCodec.encodePlaintext(
+        helloMessage,
+        padToBlockSize: true,
+      );
+      final helloEncrypted = session.encryptInitial(helloPlain);
+      final helloFrame = _encodeFileTransferFrame(helloEncrypted);
+      socket.add(helloFrame);
+      await socket.flush();
+
+      final answerFrame = await _readNextFrame(
+        iterator,
+        frameCodec,
+        const Duration(seconds: 5),
+      );
+      if (answerFrame == null) {
+        _log('RX BEE-FILE handshake failed: missing HELLO from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return null;
+      }
+
+      final answerMessage = _decodeHelloMessage(answerFrame, session: session);
+      if (answerMessage == null) {
+        _log('RX BEE-FILE handshake failed: invalid HELLO from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return null;
+      }
+
+      final peerHello = HelloPayload.decodeText(answerMessage.text);
+      final encryptionDisabled =
+          (answerMessage.flags &
+              beeBeepFlagBit(BeeBeepMessageFlag.encryptionDisabled)) !=
+          0;
+      final peerPublicKey = _ecdh.publicKeyFromBeeBeepString(
+        peerHello.publicKey,
+      );
+      final sharedBytes = _ecdh.computeSharedSecret(
+        privateKey: keyPair.privateKey,
+        peerPublicKey: peerPublicKey,
+      );
+      final sharedKey = _sharedKeyFromBytes(sharedBytes);
+      final cipherKeyHex = _cipherKeyHexFromSharedKey(
+        sharedKey,
+        peerHello.dataStreamVersion,
+      );
+      final cipherKeyBytes = _buildAesKeyFromHex(
+        cipherKeyHex,
+        _protocolVersion,
+      );
+
+      final request = BeeBeepMessage(
+        type: BeeBeepMessageType.file,
+        id: _nextMessageId++,
+        flags: beeBeepFlagBit(BeeBeepMessageFlag.private),
+        data: _serializeBeeBeepFileInfoData(info),
+        timestamp: DateTime.now(),
+        text: info.fileName,
+      );
+      final requestPlain = _fileTransferCodec.encodePlaintext(
+        request,
+        padToBlockSize: true,
+      );
+      final requestPayload = encryptionDisabled
+          ? requestPlain
+          : _encryptBeeBeepBytes(requestPlain, cipherKeyBytes);
+      final requestFrame = _encodeFileTransferFrame(requestPayload);
+      socket.add(requestFrame);
+      await socket.flush();
+
+      final headerFrame = await _readNextFrame(
+        iterator,
+        frameCodec,
+        const Duration(seconds: 8),
+      );
+      if (headerFrame == null) {
+        _log('RX BEE-FILE missing header from $host');
+        await iterator.cancel();
+        socket.destroy();
+        return null;
+      }
+
+      final headerPayload = encryptionDisabled
+          ? headerFrame
+          : _decryptBeeBeepBytes(headerFrame, cipherKeyBytes);
+      final headerMessage = _fileTransferCodec.decodePlaintext(headerPayload);
+      if (headerMessage.type != BeeBeepMessageType.file) {
+        _log('RX BEE-FILE invalid header from $host');
+      }
+
+      final data = BytesBuilder();
+      var received = 0;
+      while (received < info.fileSize) {
+        final frame = await _readNextFrame(
+          iterator,
+          frameCodec,
+          const Duration(seconds: 12),
+        );
+        if (frame == null) break;
+        final payload = encryptionDisabled
+            ? frame
+            : _decryptBeeBeepBytes(frame, cipherKeyBytes);
+        data.add(payload);
+        received += payload.length;
+      }
+
+      await iterator.cancel();
+      socket.destroy();
+
+      final bytes = data.takeBytes();
+      if (bytes.length < info.fileSize) {
+        _log(
+          'RX BEE-FILE expected ${info.fileSize} bytes, got ${bytes.length}',
+        );
+        return null;
+      }
+      return Uint8List.fromList(bytes.take(info.fileSize).toList());
+    } catch (e) {
+      _log('RX BEE-FILE download error: $e');
+      return null;
+    }
+  }
+
+  String _serializeBeeBeepFileInfoData(_BeeBeepFileInfo info) {
+    final lastModified = info.lastModifiedRaw.isNotEmpty
+        ? info.lastModifiedRaw
+        : (info.lastModified == null
+              ? ''
+              : _formatIsoDateUtc(info.lastModified!.toUtc()));
+    return [
+      info.port.toString(),
+      info.fileSize.toString(),
+      info.id.toString(),
+      _sanitizeBeeBeepField(info.password),
+      _sanitizeBeeBeepField(info.fileHash),
+      _sanitizeBeeBeepField(info.shareFolder),
+      info.isInShareBox ? '1' : '0',
+      _sanitizeBeeBeepField(info.chatPrivateId),
+      lastModified,
+      _sanitizeBeeBeepField(info.mimeType),
+      info.contentType.toString(),
+      info.startingPosition.toString(),
+      info.duration.toString(),
+    ].join(beeBeepDataFieldSeparator);
+  }
+
+  String _sanitizeBeeBeepField(String value) {
+    return value.replaceAll(beeBeepDataFieldSeparator, '_');
+  }
+
+  String _formatIsoDateUtc(DateTime dateTime) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    final y = dateTime.year.toString().padLeft(4, '0');
+    final m = two(dateTime.month);
+    final d = two(dateTime.day);
+    final h = two(dateTime.hour);
+    final min = two(dateTime.minute);
+    final s = two(dateTime.second);
+    return '$y-$m-${d}T$h:$min:${s}Z';
+  }
+
+  HelloPayload _buildHelloPayloadWithKey(String publicKey) {
+    return HelloPayload(
+      port: _localHello.port,
+      displayName: _localHello.displayName,
+      status: _localHello.status,
+      statusDescription: _localHello.statusDescription,
+      accountName: _localHello.accountName,
+      publicKey: publicKey,
+      version: _localHello.version,
+      hash: _localHello.hash,
+      color: _localHello.color,
+      workgroups: _localHello.workgroups,
+      qtVersion: _localHello.qtVersion,
+      dataStreamVersion: _localHello.dataStreamVersion,
+      statusChangedIn: _localHello.statusChangedIn,
+      domainName: _localHello.domainName,
+      localHostName: _localHello.localHostName,
+    );
+  }
+
+  Uint8List _encodeFileTransferFrame(Uint8List payload) {
+    if (_protocolVersion > 60) {
+      return QtFrameCodec().encodeFrame(payload);
+    }
+    return QtFrameCodec().encodeFrame16(payload);
+  }
+
+  Future<Uint8List?> _readNextFrame(
+    StreamIterator<List<int>> iterator,
+    AdaptiveQtFrameCodec codec,
+    Duration timeout,
+  ) async {
+    while (true) {
+      final moved = await Future.any([
+        iterator.moveNext(),
+        Future<bool>.delayed(timeout, () => false),
+      ]);
+      if (!moved) return null;
+      codec.addChunk(Uint8List.fromList(iterator.current));
+      final frames = codec.takeFrames();
+      if (frames.isNotEmpty) {
+        return frames.first;
+      }
+    }
+  }
+
+  BeeBeepMessage? _decodeHelloMessage(
+    Uint8List payload, {
+    required BeeBeepCryptoSession session,
+  }) {
+    try {
+      final decrypted = session.decryptInitial(payload);
+      final message = _fileTransferCodec.decodePlaintext(decrypted);
+      if (message.type == BeeBeepMessageType.hello) return message;
+    } catch (_) {}
+
+    final message = _fileTransferCodec.decodePlaintext(payload);
+    if (message.type == BeeBeepMessageType.hello) return message;
+    return null;
+  }
+
+  String _cipherKeyHexFromSharedKey(String sharedKey, int dataStreamVersion) {
+    final input = Uint8List.fromList(utf8.encode(sharedKey));
+    final digest = dataStreamVersion >= 13 ? sha3_256(input) : sha1(input);
+    return bytesToHex(digest);
+  }
+
+  Uint8List _buildAesKeyFromHex(String cipherKeyHex, int protocolVersion) {
+    const keyLength = beeBeepEncryptionKeyBits ~/ 8;
+    if (protocolVersion >= 80) {
+      final hexBytes = hexToBytes(cipherKeyHex);
+      final padded = Uint8List(keyLength);
+      final len = hexBytes.length > keyLength ? keyLength : hexBytes.length;
+      padded.setRange(0, len, hexBytes.sublist(0, len));
+      return padded;
+    }
+    return Uint8List(keyLength);
+  }
+
+  Uint8List _encryptBeeBeepBytes(Uint8List data, Uint8List key) {
+    if (key.isEmpty) return data;
+    final cipher = BeeBeepAesEcb(key: key);
+    final out = BytesBuilder();
+    const blockSize = beeBeepEncryptedDataBlockSize;
+    final fullBlocks = data.length ~/ blockSize;
+    for (var i = 0; i < fullBlocks; i++) {
+      final start = i * blockSize;
+      final block = Uint8List.fromList(data.sublist(start, start + blockSize));
+      out.add(cipher.encrypt(block));
+    }
+    final remainderStart = fullBlocks * blockSize;
+    if (remainderStart < data.length) {
+      out.add(data.sublist(remainderStart));
+    }
+    return out.takeBytes();
+  }
+
+  Uint8List _decryptBeeBeepBytes(Uint8List data, Uint8List key) {
+    if (key.isEmpty) return data;
+    final cipher = BeeBeepAesEcb(key: key);
+    final out = BytesBuilder();
+    const blockSize = beeBeepEncryptedDataBlockSize;
+    final fullBlocks = data.length ~/ blockSize;
+    for (var i = 0; i < fullBlocks; i++) {
+      final start = i * blockSize;
+      final block = Uint8List.fromList(data.sublist(start, start + blockSize));
+      out.add(cipher.decrypt(block));
+    }
+    final remainderStart = fullBlocks * blockSize;
+    if (remainderStart < data.length) {
+      out.add(data.sublist(remainderStart));
+    }
+    return out.takeBytes();
+  }
+
+  int? _asInt(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
+  }
+
+  void _purgeOldIncoming() {
+    final now = DateTime.now();
+    _incomingFiles.removeWhere(
+      (_, buffer) => now.difference(buffer.createdAt).inMinutes > 10,
+    );
   }
 
   Future<String> _persistIncomingFile({
@@ -987,8 +2099,20 @@ class _BeeBeepConnection {
       );
     }
 
-    _socket.add(frame);
-    _socket.flush();
+    _enqueueSend(frame);
+  }
+
+  void _enqueueSend(Uint8List frame) {
+    _txChain = _txChain.then((_) async {
+      if (_closed) return;
+      try {
+        _socket.add(frame);
+        await _socket.flush();
+      } catch (e) {
+        _log('TX failed: $e');
+        await close();
+      }
+    });
   }
 
   Uint8List _encodeTxFrame(Uint8List payload) {
@@ -1115,5 +2239,39 @@ class _BeeBeepConnection {
       _sendMessage(helloMsg, useInitialCipher: true);
       _log('TX HELLO (u32be)');
     });
+  }
+}
+
+class _IncomingFileBuffer {
+  _IncomingFileBuffer({
+    required this.fileName,
+    required this.totalParts,
+    required this.fileSize,
+    required this.isVoice,
+    required this.durationMs,
+  });
+
+  final String fileName;
+  final int totalParts;
+  final int fileSize;
+  final bool isVoice;
+  final int? durationMs;
+  final DateTime createdAt = DateTime.now();
+  final Map<int, Uint8List> _parts = {};
+
+  void addPart(int index, Uint8List bytes) {
+    _parts[index] = bytes;
+  }
+
+  bool get isComplete => _parts.length == totalParts;
+
+  Uint8List assemble() {
+    final builder = BytesBuilder(copy: false);
+    for (var i = 0; i < totalParts; i++) {
+      final part = _parts[i];
+      if (part == null) continue;
+      builder.add(part);
+    }
+    return builder.takeBytes();
   }
 }

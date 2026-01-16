@@ -33,6 +33,7 @@ abstract interface class ConnectionRepository {
     required Uint8List bytes,
     required int fileSize,
     String? mimeType,
+    Duration? duration,
   });
 
   Future<void> disconnectAll();

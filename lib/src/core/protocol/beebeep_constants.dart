@@ -8,6 +8,10 @@ const int beeBeepEncryptionKeyBits = 256;
 
 const String beeBeepServiceType = '_beebeep._tcp';
 
+const int beeBeepUdpDiscoveryPort = 6475;
+const String beeBeepUdpDiscoveryMessage = 'BEEBEEP_DISCOVER';
+const String beeBeepUdpResponseMessage = 'BEEBEEP_HERE';
+
 const String beeBeepProtocolFieldSeparator = '\u2029';
 const String beeBeepDataFieldSeparator = '\u2028';
 

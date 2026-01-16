@@ -1,0 +1,1 @@
+enum AudioEncoderType { AAC, WAV }

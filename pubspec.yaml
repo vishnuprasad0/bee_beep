@@ -58,6 +58,12 @@ dependencies:
   # File system paths
   path_provider: ^2.1.4
 
+  # Voice recording
+  voice_message_recorder: ^0.0.1
+
+  # Local notifications
+  flutter_local_notifications: ^18.0.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -68,6 +74,13 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+
+dependency_overrides:
+  file_picker: ^10.3.8
+  web: ^1.1.0
+  record: ^6.1.2
+  voice_message_recorder:
+    path: packages/voice_message_recorder
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

@@ -60,6 +60,7 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
     required Uint8List bytes,
     required int fileSize,
     String? mimeType,
+    Duration? duration,
   }) {
     return _dataSource.sendVoiceMessage(
       peer: peer,
@@ -67,6 +68,7 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
       bytes: bytes,
       fileSize: fileSize,
       mimeType: mimeType,
+      duration: duration,
     );
   }
 

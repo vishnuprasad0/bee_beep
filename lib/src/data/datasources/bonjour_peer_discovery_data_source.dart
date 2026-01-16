@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:bonsoir/bonsoir.dart';
@@ -21,12 +22,17 @@ class BonjourPeerDiscoveryDataSource {
   BonsoirDiscovery? _discovery;
   StreamSubscription<BonsoirDiscoveryEvent>? _sub;
 
+  RawDatagramSocket? _udpSocket;
+  StreamSubscription<RawSocketEvent>? _udpSub;
+  Timer? _udpDiscoveryTimer;
+
   int _scanGeneration = 0;
   final Set<String> _scannedSubnets = <String>{};
 
   static const int _beeBeepDefaultTcpPort = 6475;
   static const Duration _scanConnectTimeout = Duration(milliseconds: 250);
   static const int _scanParallelism = 40;
+  static const Duration _udpDiscoveryInterval = Duration(seconds: 3);
 
   void _debugLog(String message) {
     if (!const bool.fromEnvironment('dart.vm.product')) {
@@ -163,6 +169,8 @@ class BonjourPeerDiscoveryDataSource {
 
     _localIpv4Hosts = await _getLocalIpv4Hosts();
 
+    await _startUdpDiscovery();
+
     // Fallback: start a /24 scan immediately based on our own LAN address.
     // This makes discovery work on devices where mDNS isn't available/reliable.
     if (_localIpv4Hosts.isNotEmpty) {
@@ -253,6 +261,8 @@ class BonjourPeerDiscoveryDataSource {
     await discovery.stop();
     _discovery = null;
 
+    await _stopUdpDiscovery();
+
     _scanGeneration++;
     _scannedSubnets.clear();
     _debugLog('Stopped discovery; cleared LAN scan state');
@@ -272,5 +282,93 @@ class BonjourPeerDiscoveryDataSource {
   Future<void> dispose() async {
     await stop();
     await _peersController.close();
+  }
+
+  Future<void> _startUdpDiscovery() async {
+    await _stopUdpDiscovery();
+
+    try {
+      final socket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        beeBeepUdpDiscoveryPort,
+        reuseAddress: true,
+        reusePort: true,
+      );
+      socket.broadcastEnabled = true;
+
+      _udpSocket = socket;
+      _udpSub = socket.listen((event) {
+        if (event != RawSocketEvent.read) return;
+        final datagram = socket.receive();
+        if (datagram == null) return;
+        _handleUdpDatagram(datagram);
+      });
+
+      _udpDiscoveryTimer = Timer.periodic(
+        _udpDiscoveryInterval,
+        (_) => _broadcastUdpDiscovery(),
+      );
+
+      _broadcastUdpDiscovery();
+    } catch (e) {
+      _debugLog('UDP discovery start failed: $e');
+    }
+  }
+
+  Future<void> _stopUdpDiscovery() async {
+    await _udpSub?.cancel();
+    _udpSub = null;
+    _udpDiscoveryTimer?.cancel();
+    _udpDiscoveryTimer = null;
+    _udpSocket?.close();
+    _udpSocket = null;
+  }
+
+  void _broadcastUdpDiscovery() {
+    final socket = _udpSocket;
+    if (socket == null) return;
+
+    final payload = beeBeepUdpDiscoveryMessage;
+    final data = utf8.encode(payload);
+
+    socket.send(
+      data,
+      InternetAddress('255.255.255.255'),
+      beeBeepUdpDiscoveryPort,
+    );
+
+    for (final host in _localIpv4Hosts) {
+      final prefix = _subnet24Prefix(host);
+      if (prefix == null) continue;
+      socket.send(
+        data,
+        InternetAddress('${prefix}255'),
+        beeBeepUdpDiscoveryPort,
+      );
+    }
+  }
+
+  void _handleUdpDatagram(Datagram datagram) {
+    final message = utf8.decode(datagram.data, allowMalformed: true).trim();
+    if (!message.startsWith(beeBeepUdpResponseMessage)) return;
+
+    final parts = message.split('|');
+    if (parts.length < 3) return;
+
+    final displayName = parts[1].trim();
+    final port = int.tryParse(parts[2].trim()) ?? 0;
+    if (port <= 0) return;
+
+    final host = datagram.address.address;
+    if (_isSelfHost(host)) return;
+
+    final id = '$host:$port';
+    _peersById[id] = Peer(
+      id: id,
+      displayName: displayName.isEmpty ? host : displayName,
+      host: host,
+      port: port,
+    );
+    _emit();
   }
 }
