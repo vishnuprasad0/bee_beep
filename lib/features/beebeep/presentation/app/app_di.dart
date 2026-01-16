@@ -1,4 +1,4 @@
-import '../../core/protocol/beebeep_constants.dart';
+import 'package:beebeep/core/protocol/beebeep_constants.dart';
 import '../../data/datasources/bonjour_peer_advertiser_data_source.dart';
 import '../../data/datasources/bonjour_peer_discovery_data_source.dart';
 import '../../data/datasources/tcp_connection_data_source.dart';

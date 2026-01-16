@@ -31,6 +31,17 @@ flowchart LR
 - Persistent message history (Hive).
 - Connection logs and simple settings UI.
 
+## Clean Architecture Status
+This codebase is **partially** aligned with Clean Architecture:
+- **Presentation / Domain / Data** layers exist under `lib/src/`.
+- Use-cases and repositories are separated in the **domain** layer.
+- Data sources and repository implementations live in the **data** layer.
+
+Work still needed:
+- Enforce strict dependency direction (presentation -> domain -> data only).
+- Isolate protocol/transport details from presentation state and UI logic.
+- Ensure entities and use-cases stay free of Flutter/framework types.
+
 ## Technical Notes
 - **Discovery:** mDNS (Bonjour) advertises `_beebeep._tcp` and scans LAN peers.
 - **Transport:** TCP sockets with Qt‑style framing (16/32‑bit prefixes).
@@ -40,6 +51,12 @@ flowchart LR
 - **Persistence:** Chat history stored in Hive, peer display names cached.
 - **Default port:** 6475 (fallback to ephemeral if busy).
 - **Saved files:** app documents directory under `beebeep_files/`.
+
+## Current Status (Known Issues)
+- **File download from BeeBEEP desktop times out** after the transfer is queued.
+	- Log example: "Connection timeout" during file download session.
+	- Upload attempts are sent, but the peer times out before data transfer completes.
+	- File transfer protocol parity is in progress.
 
 ## File Structure (high level)
 ```

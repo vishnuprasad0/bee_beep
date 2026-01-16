@@ -4,8 +4,8 @@ import 'dart:io';
 
 import 'package:bonsoir/bonsoir.dart';
 
-import '../../domain/entities/peer.dart';
-import '../../core/protocol/beebeep_constants.dart';
+import 'package:beebeep/core/protocol/beebeep_constants.dart';
+import 'package:beebeep/features/beebeep/domain/entities/peer.dart';
 
 class BonjourPeerDiscoveryDataSource {
   BonjourPeerDiscoveryDataSource();

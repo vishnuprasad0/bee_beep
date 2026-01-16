@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
-import '../../data/datasources/received_message.dart';
 import '../entities/peer.dart';
 import '../entities/peer_identity.dart';
+import '../entities/received_message.dart';
 
 abstract interface class ConnectionRepository {
   Stream<String> watchLogs();

@@ -4,20 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
-import 'src/domain/entities/chat_message.dart';
-import 'src/data/datasources/chat_history_hive_data_source.dart';
-import 'src/data/datasources/peer_cache_hive_data_source.dart';
-import 'src/data/datasources/settings_local_data_source.dart';
-import 'src/data/models/chat_message_hive_adapter.dart';
-import 'src/data/repositories/chat_history_repository_impl.dart';
-import 'src/data/repositories/peer_cache_repository_impl.dart';
-import 'src/data/repositories/settings_repository_impl.dart';
-import 'src/presentation/app/app_di.dart';
-import 'src/presentation/bloc/chat/chat_cubit.dart';
-import 'src/presentation/bloc/logs/logs_cubit.dart';
-import 'src/presentation/bloc/peers/peers_cubit.dart';
-import 'src/presentation/pages/home_page.dart';
-import 'src/presentation/services/local_notification_service.dart';
+import 'package:beebeep/features/beebeep/data/datasources/chat_history_hive_data_source.dart';
+import 'package:beebeep/features/beebeep/data/datasources/peer_cache_hive_data_source.dart';
+import 'package:beebeep/features/beebeep/data/datasources/settings_local_data_source.dart';
+import 'package:beebeep/features/beebeep/data/models/chat_message_hive_adapter.dart';
+import 'package:beebeep/features/beebeep/data/repositories/chat_history_repository_impl.dart';
+import 'package:beebeep/features/beebeep/data/repositories/peer_cache_repository_impl.dart';
+import 'package:beebeep/features/beebeep/data/repositories/settings_repository_impl.dart';
+import 'package:beebeep/features/beebeep/domain/entities/chat_message.dart';
+import 'package:beebeep/features/beebeep/presentation/app/app_di.dart';
+import 'package:beebeep/features/beebeep/presentation/bloc/chat/chat_cubit.dart';
+import 'package:beebeep/features/beebeep/presentation/bloc/logs/logs_cubit.dart';
+import 'package:beebeep/features/beebeep/presentation/bloc/peers/peers_cubit.dart';
+import 'package:beebeep/features/beebeep/presentation/pages/home_page.dart';
+import 'package:beebeep/features/beebeep/presentation/services/local_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

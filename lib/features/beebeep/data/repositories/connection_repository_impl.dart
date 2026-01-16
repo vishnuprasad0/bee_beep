@@ -2,8 +2,8 @@ import 'dart:typed_data';
 
 import '../../domain/entities/peer.dart';
 import '../../domain/entities/peer_identity.dart';
+import '../../domain/entities/received_message.dart';
 import '../../domain/repositories/connection_repository.dart';
-import '../datasources/received_message.dart';
 import '../datasources/tcp_connection_data_source.dart';
 
 class ConnectionRepositoryImpl implements ConnectionRepository {

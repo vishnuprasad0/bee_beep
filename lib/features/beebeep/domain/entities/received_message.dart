@@ -1,6 +1,6 @@
 import 'package:equatable/equatable.dart';
 
-import '../../domain/entities/chat_message.dart';
+import 'chat_message.dart';
 
 class ReceivedMessage extends Equatable {
   const ReceivedMessage({

@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:bonsoir/bonsoir.dart';
 
-import '../../core/protocol/beebeep_constants.dart';
+import 'package:beebeep/core/protocol/beebeep_constants.dart';
 
 class BonjourPeerAdvertiserDataSource {
   BonjourPeerAdvertiserDataSource();

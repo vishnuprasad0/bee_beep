@@ -1,5 +1,5 @@
-import '../../data/datasources/received_message.dart';
 import '../repositories/connection_repository.dart';
+import '../entities/received_message.dart';
 
 class WatchReceivedMessages {
   const WatchReceivedMessages(this._connectionRepository);
