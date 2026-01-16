@@ -6,6 +6,7 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -69,6 +70,28 @@ class _FakeConnectionRepository implements ConnectionRepository {
   @override
   Future<void> sendChat({required Peer peer, required String text}) async {
     _controller.add('chat ${peer.displayName}: $text');
+  }
+
+  @override
+  Future<void> sendFile({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) async {
+    _controller.add('file ${peer.displayName}: $fileName');
+  }
+
+  @override
+  Future<void> sendVoiceMessage({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) async {
+    _controller.add('voice ${peer.displayName}: $fileName');
   }
 
   @override

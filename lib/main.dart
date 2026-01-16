@@ -1,7 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 import 'src/domain/entities/chat_message.dart';
+import 'src/data/datasources/chat_history_hive_data_source.dart';
+import 'src/data/datasources/settings_local_data_source.dart';
+import 'src/data/models/chat_message_hive_adapter.dart';
+import 'src/data/repositories/chat_history_repository_impl.dart';
+import 'src/data/repositories/settings_repository_impl.dart';
 import 'src/presentation/app/app_di.dart';
 import 'src/presentation/bloc/chat/chat_cubit.dart';
 import 'src/presentation/bloc/logs/logs_cubit.dart';
@@ -11,7 +19,33 @@ import 'src/presentation/pages/home_page.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  final di = AppDi(displayName: 'BeeBEEP Dart');
+  await Hive.initFlutter();
+  Hive.registerAdapter(ChatMessageAdapter());
+
+  final settingsBox = await Hive.openBox<String>(
+    SettingsLocalDataSource.boxName,
+  );
+  final chatHistoryBox = await Hive.openBox<List<ChatMessage>>(
+    ChatHistoryHiveDataSource.boxName,
+  );
+
+  final settingsRepo = SettingsRepositoryImpl(
+    SettingsLocalDataSource(settingsBox),
+  );
+  final chatHistoryRepo = ChatHistoryRepositoryImpl(
+    ChatHistoryHiveDataSource(chatHistoryBox),
+  );
+
+  final savedName = await settingsRepo.getDisplayName();
+  final displayName = (savedName?.trim().isNotEmpty ?? false)
+      ? savedName!.trim()
+      : 'BeeBEEP Dart';
+
+  final di = AppDi(
+    displayName: displayName,
+    settingsRepository: settingsRepo,
+    chatHistoryRepository: chatHistoryRepo,
+  );
   await di.startNode();
 
   runApp(BeeBeepApp(di: di));
@@ -39,6 +73,10 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
       providers: [
         RepositoryProvider.value(value: widget.di.connectToPeer),
         RepositoryProvider.value(value: widget.di.sendChatToPeer),
+        RepositoryProvider.value(value: widget.di.sendFileToPeer),
+        RepositoryProvider.value(value: widget.di.sendVoiceMessageToPeer),
+        RepositoryProvider.value(value: widget.di.loadDiscoveryName),
+        RepositoryProvider.value(value: widget.di.updateDiscoveryName),
       ],
       child: MultiBlocProvider(
         providers: [
@@ -55,7 +93,11 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
           ),
           BlocProvider(
             create: (context) {
-              final cubit = ChatCubit();
+              final cubit = ChatCubit(
+                loadChatHistory: widget.di.loadChatHistory,
+                saveChatHistory: widget.di.saveChatHistory,
+              );
+              unawaited(cubit.loadHistory());
               // Listen to received messages and add them to chat
               widget.di.watchReceivedMessages().listen((receivedMsg) {
                 final message = ChatMessage(
@@ -65,6 +107,11 @@ class _BeeBeepAppState extends State<BeeBeepApp> {
                   timestamp: receivedMsg.timestamp,
                   isOutgoing: false,
                   status: MessageStatus.delivered,
+                  type: receivedMsg.type,
+                  filePath: receivedMsg.filePath,
+                  fileSize: receivedMsg.fileSize,
+                  fileName: receivedMsg.fileName,
+                  duration: receivedMsg.duration,
                 );
                 cubit.addMessage(message);
               });

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:path_provider/path_provider.dart';
 import 'package:pointycastle/digests/sha1.dart';
 
 import '../../core/crypto/beebeep_crypto_session.dart';
@@ -12,6 +13,7 @@ import '../../core/protocol/beebeep_constants.dart';
 import '../../core/protocol/beebeep_message.dart';
 import '../../core/protocol/beebeep_message_codec.dart';
 import '../../core/protocol/hello_payload.dart';
+import '../../domain/entities/chat_message.dart';
 import '../../domain/entities/peer.dart';
 import '../../domain/entities/peer_identity.dart';
 import 'received_message.dart';
@@ -29,7 +31,7 @@ class TcpConnectionDataSource {
        _passwordOverride = passwordOverride,
        _signatureOverride = signatureOverride;
 
-  final String _localDisplayName;
+  String _localDisplayName;
   final int _protocolVersion;
   final int _dataStreamVersion;
   final String? _passwordOverride;
@@ -54,8 +56,18 @@ class TcpConnectionDataSource {
       <String, _BeeBeepConnection>{};
   final Map<String, List<String>> _pendingChatTextsByPeerId =
       <String, List<String>>{};
+  final Map<String, List<_PendingFileTransfer>> _pendingFilesByPeerId =
+      <String, List<_PendingFileTransfer>>{};
 
   int? get serverPort => _server?.port;
+
+  /// Updates the local display name for newly established connections.
+  void updateLocalDisplayName(String displayName) {
+    final trimmed = displayName.trim();
+    if (trimmed.isEmpty) return;
+    _localDisplayName = trimmed;
+    _log('Local display name updated to "$trimmed"');
+  }
 
   final BeeBeepEcdhSect163k1 _ecdh = BeeBeepEcdhSect163k1();
   late final Sect163k1KeyPair _localKeyPair = _ecdh.generateKeyPair();
@@ -306,6 +318,66 @@ class TcpConnectionDataSource {
     await connect(peer);
   }
 
+  Future<void> sendFile({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) async {
+    await _sendFileInternal(
+      peer: peer,
+      transfer: _PendingFileTransfer(
+        fileName: fileName,
+        bytes: bytes,
+        fileSize: fileSize,
+        mimeType: mimeType,
+        isVoice: false,
+      ),
+    );
+  }
+
+  Future<void> sendVoiceMessage({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) async {
+    await _sendFileInternal(
+      peer: peer,
+      transfer: _PendingFileTransfer(
+        fileName: fileName,
+        bytes: bytes,
+        fileSize: fileSize,
+        mimeType: mimeType,
+        isVoice: true,
+      ),
+    );
+  }
+
+  Future<void> _sendFileInternal({
+    required Peer peer,
+    required _PendingFileTransfer transfer,
+  }) async {
+    final peerId = '${peer.host}:${peer.port}';
+    final existing = _connectionsByPeerId[peerId];
+    if (existing != null) {
+      final sent = existing.sendFileTransfer(transfer);
+      if (!sent) {
+        _pendingFilesByPeerId
+            .putIfAbsent(peerId, () => <_PendingFileTransfer>[])
+            .add(transfer);
+      }
+      return;
+    }
+
+    _pendingFilesByPeerId
+        .putIfAbsent(peerId, () => <_PendingFileTransfer>[])
+        .add(transfer);
+    await connect(peer);
+  }
+
   Future<void> disconnectAll() async {
     final list = List<_BeeBeepConnection>.from(_connections);
     _connections.clear();
@@ -323,6 +395,10 @@ class TcpConnectionDataSource {
     String? peerHostHint,
     required bool isIncoming,
   }) {
+    _log(
+      'Connection opened (${isIncoming ? 'incoming' : 'outgoing'}) '
+      '${socket.remoteAddress.address}:${socket.remotePort}',
+    );
     final conn = _BeeBeepConnection(
       socket: socket,
       isIncoming: isIncoming,
@@ -337,7 +413,7 @@ class TcpConnectionDataSource {
       passwordHex: _passwordHex,
       onPeerIdentity: (identity) => _peerIdentities.add(identity),
       onPeerIdKnown: _bindPeerConnection,
-      onCryptoReady: _flushPendingChats,
+      onCryptoReady: _flushPendingOutbound,
       onClosed: _unbindPeerConnection,
       onLog: _log,
       onReceivedMessage: (msg) => _receivedMessages.add(msg),
@@ -382,12 +458,18 @@ class TcpConnectionDataSource {
     );
   }
 
-  void _flushPendingChats(String peerId, _BeeBeepConnection conn) {
+  void _flushPendingOutbound(String peerId, _BeeBeepConnection conn) {
     final pending = _pendingChatTextsByPeerId.remove(peerId);
     if (pending == null || pending.isEmpty) return;
 
     for (final text in pending) {
       conn.sendChatText(text);
+    }
+
+    final pendingFiles = _pendingFilesByPeerId.remove(peerId);
+    if (pendingFiles == null || pendingFiles.isEmpty) return;
+    for (final transfer in pendingFiles) {
+      conn.sendFileTransfer(transfer);
     }
   }
 
@@ -471,6 +553,22 @@ class TcpConnectionDataSource {
     await _peerIdentities.close();
     await _logs.close();
   }
+}
+
+class _PendingFileTransfer {
+  _PendingFileTransfer({
+    required this.fileName,
+    required this.bytes,
+    required this.fileSize,
+    required this.isVoice,
+    this.mimeType,
+  });
+
+  final String fileName;
+  final Uint8List bytes;
+  final int fileSize;
+  final bool isVoice;
+  final String? mimeType;
 }
 
 class _BeeBeepConnection {
@@ -688,6 +786,11 @@ class _BeeBeepConnection {
       return;
     }
 
+    if (msg.type == BeeBeepMessageType.file) {
+      unawaited(_handleFileMessage(msg));
+      return;
+    }
+
     if (msg.type == BeeBeepMessageType.undefined) {
       _log(
         'RX unknown payload (${plaintext.length} bytes): ${_hexPreview(plaintext, maxBytes: 48)} text="${_textPreview(plaintext)}"',
@@ -723,6 +826,123 @@ class _BeeBeepConnection {
     _sendMessage(message);
     _log('TX BEE-CHAT id=${message.id} text="$text"');
     return true;
+  }
+
+  bool sendFileTransfer(_PendingFileTransfer transfer) {
+    if (!_cryptoSession.isReady) {
+      final label = transfer.isVoice ? 'Voice' : 'File';
+      _log('$label queued (crypto not ready yet)');
+      return false;
+    }
+
+    final flags = transfer.isVoice
+        ? beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)
+        : 0;
+
+    final meta = <String, Object?>{
+      'name': transfer.fileName,
+      'size': transfer.fileSize,
+      'mime': transfer.mimeType,
+      'voice': transfer.isVoice,
+    };
+
+    final message = BeeBeepMessage(
+      type: BeeBeepMessageType.file,
+      id: _nextMessageId++,
+      flags: flags,
+      data: base64Encode(transfer.bytes),
+      timestamp: DateTime.now(),
+      text: jsonEncode(meta),
+    );
+
+    _sendMessage(message);
+    _log(
+      'TX BEE-FILE id=${message.id} name="${transfer.fileName}" size=${transfer.fileSize} voice=${transfer.isVoice}',
+    );
+    return true;
+  }
+
+  Future<void> _handleFileMessage(BeeBeepMessage msg) async {
+    try {
+      final meta = _parseFileMeta(msg.text);
+      final isVoice =
+          (msg.flags & beeBeepFlagBit(BeeBeepMessageFlag.voiceMessage)) != 0 ||
+          (meta['voice'] == true);
+      final rawName = meta['name'];
+      final fileName = rawName is String && rawName.trim().isNotEmpty
+          ? rawName.trim()
+          : 'file';
+
+      final bytes = base64Decode(msg.data);
+      final rawSize = meta['size'];
+      final fileSize = rawSize is int
+          ? rawSize
+          : (rawSize is num ? rawSize.toInt() : bytes.length);
+      final durationMs = meta['durationMs'] as int?;
+
+      final savedPath = await _persistIncomingFile(
+        fileName: fileName,
+        bytes: bytes,
+        isVoice: isVoice,
+      );
+
+      final peerName = _peerHello?.displayName ?? 'Unknown';
+      final peerId = _peerId ?? '';
+      if (peerId.isEmpty) return;
+
+      _onReceivedMessage(
+        ReceivedMessage(
+          peerId: peerId,
+          peerName: peerName,
+          text: isVoice ? 'Voice message' : fileName,
+          timestamp: DateTime.now(),
+          messageId: msg.id.toString(),
+          type: isVoice ? MessageType.voice : MessageType.file,
+          filePath: savedPath,
+          fileSize: fileSize,
+          fileName: fileName,
+          duration: durationMs != null
+              ? Duration(milliseconds: durationMs)
+              : null,
+        ),
+      );
+
+      _log(
+        'RX BEE-FILE id=${msg.id} name="$fileName" size=$fileSize voice=$isVoice saved="$savedPath"',
+      );
+    } catch (e) {
+      _log('RX file message failed: $e');
+    }
+  }
+
+  Map<String, Object?> _parseFileMeta(String text) {
+    try {
+      final raw = jsonDecode(text);
+      if (raw is Map<String, dynamic>) {
+        return raw;
+      }
+    } catch (_) {
+      // Ignore parsing errors.
+    }
+    return <String, Object?>{};
+  }
+
+  Future<String> _persistIncomingFile({
+    required String fileName,
+    required Uint8List bytes,
+    required bool isVoice,
+  }) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final targetDir = Directory('${dir.path}/beebeep_files');
+    await targetDir.create(recursive: true);
+
+    final safeName = fileName.replaceAll(RegExp(r'[^\w\d._ -]'), '_');
+    final prefix = isVoice ? 'voice' : 'file';
+    final path =
+        '${targetDir.path}/${DateTime.now().millisecondsSinceEpoch}_${prefix}_$safeName';
+    final file = File(path);
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
   }
 
   void _sendMessage(BeeBeepMessage message, {bool useInitialCipher = false}) {

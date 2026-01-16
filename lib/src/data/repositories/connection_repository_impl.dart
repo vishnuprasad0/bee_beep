@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../../domain/entities/peer.dart';
 import '../../domain/entities/peer_identity.dart';
 import '../../domain/repositories/connection_repository.dart';
@@ -33,6 +35,40 @@ class ConnectionRepositoryImpl implements ConnectionRepository {
   @override
   Future<void> sendChat({required Peer peer, required String text}) =>
       _dataSource.sendChat(peer: peer, text: text);
+
+  @override
+  Future<void> sendFile({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) {
+    return _dataSource.sendFile(
+      peer: peer,
+      fileName: fileName,
+      bytes: bytes,
+      fileSize: fileSize,
+      mimeType: mimeType,
+    );
+  }
+
+  @override
+  Future<void> sendVoiceMessage({
+    required Peer peer,
+    required String fileName,
+    required Uint8List bytes,
+    required int fileSize,
+    String? mimeType,
+  }) {
+    return _dataSource.sendVoiceMessage(
+      peer: peer,
+      fileName: fileName,
+      bytes: bytes,
+      fileSize: fileSize,
+      mimeType: mimeType,
+    );
+  }
 
   @override
   Future<void> disconnectAll() => _dataSource.disconnectAll();

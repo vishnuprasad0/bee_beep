@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 
+import '../../domain/entities/chat_message.dart';
 import '../../domain/use_cases/connect_to_peer.dart';
 import '../bloc/chat/chat_cubit.dart';
 import '../bloc/chat/chat_state.dart';
@@ -111,7 +112,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     subtitle: lastMessage != null
                         ? Text(
-                            lastMessage.text,
+                            _previewText(lastMessage),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -204,6 +205,17 @@ class _HomePageState extends State<HomePage> {
       return DateFormat.E().format(time);
     } else {
       return DateFormat.MMMd().format(time);
+    }
+  }
+
+  String _previewText(ChatMessage message) {
+    switch (message.type) {
+      case MessageType.file:
+        return '📎 ${message.fileName ?? 'File'}';
+      case MessageType.voice:
+        return '🎤 Voice message';
+      case MessageType.text:
+        return message.text;
     }
   }
 }

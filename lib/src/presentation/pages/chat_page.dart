@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 
 import '../../domain/entities/chat_message.dart';
 import '../../domain/entities/peer.dart';
 import '../../domain/use_cases/send_chat_to_peer.dart';
+import '../../domain/use_cases/send_file_to_peer.dart';
+import '../../domain/use_cases/send_voice_message_to_peer.dart';
 import '../bloc/chat/chat_cubit.dart';
 import '../bloc/chat/chat_state.dart';
 
@@ -51,6 +54,89 @@ class _ChatPageState extends State<ChatPage> {
     _scrollToBottom();
   }
 
+  Future<void> _sendFile() async {
+    final result = await FilePicker.platform.pickFiles(withData: true);
+    if (result == null || result.files.isEmpty) return;
+
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to read file bytes')),
+        );
+      }
+      return;
+    }
+
+    final sendFileToPeer = context.read<SendFileToPeer>();
+    await sendFileToPeer(
+      peer: widget.peer,
+      fileName: file.name,
+      bytes: bytes,
+      fileSize: file.size,
+    );
+
+    final chatCubit = context.read<ChatCubit>();
+    final message = ChatMessage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      peerId: widget.peer.id,
+      text: file.name,
+      timestamp: DateTime.now(),
+      isOutgoing: true,
+      status: MessageStatus.sent,
+      type: MessageType.file,
+      fileName: file.name,
+      fileSize: file.size,
+      filePath: file.path,
+    );
+    chatCubit.addMessage(message);
+    _scrollToBottom();
+  }
+
+  Future<void> _sendVoiceMessage() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+
+    final file = result.files.single;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to read audio bytes')),
+        );
+      }
+      return;
+    }
+
+    final sendVoiceMessage = context.read<SendVoiceMessageToPeer>();
+    await sendVoiceMessage(
+      peer: widget.peer,
+      fileName: file.name,
+      bytes: bytes,
+      fileSize: file.size,
+    );
+
+    final chatCubit = context.read<ChatCubit>();
+    final message = ChatMessage(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      peerId: widget.peer.id,
+      text: 'Voice message',
+      timestamp: DateTime.now(),
+      isOutgoing: true,
+      status: MessageStatus.sent,
+      type: MessageType.voice,
+      fileName: file.name,
+      fileSize: file.size,
+      filePath: file.path,
+    );
+    chatCubit.addMessage(message);
+    _scrollToBottom();
+  }
+
   void _scrollToBottom() {
     if (_scrollController.hasClients) {
       Future.delayed(const Duration(milliseconds: 100), () {
@@ -83,19 +169,13 @@ class _ChatPageState extends State<ChatPage> {
           IconButton(
             icon: const Icon(Icons.attach_file),
             onPressed: () {
-              // TODO: Implement file picker
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('File transfer coming soon')),
-              );
+              _sendFile();
             },
           ),
           IconButton(
             icon: const Icon(Icons.mic),
             onPressed: () {
-              // TODO: Implement voice recording
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Voice transfer coming soon')),
-              );
+              _sendVoiceMessage();
             },
           ),
         ],
@@ -169,6 +249,23 @@ class _ChatPageState extends State<ChatPage> {
       child: SafeArea(
         child: Row(
           children: [
+            IconButton(
+              icon: const Icon(Icons.emoji_emotions_outlined),
+              onPressed: () {
+                final selection = _textController.selection;
+                final text = _textController.text;
+                final insertAt = selection.isValid
+                    ? selection.start
+                    : text.length;
+                final newText = text.replaceRange(insertAt, insertAt, '😊');
+                _textController.value = TextEditingValue(
+                  text: newText,
+                  selection: TextSelection.collapsed(
+                    offset: insertAt + '😊'.length,
+                  ),
+                );
+              },
+            ),
             Expanded(
               child: TextField(
                 controller: _textController,
